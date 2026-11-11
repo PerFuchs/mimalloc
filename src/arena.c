@@ -218,20 +218,6 @@ static mi_arena_t* mi_arena_from_memid(mi_memid_t memid, size_t* slice_index, si
   return arena;
 }
 
-static size_t mi_page_full_size(mi_page_t* page) {
-  if (page->memid.memkind == MI_MEM_ARENA) {
-    return page->memid.mem.arena.slice_count * MI_ARENA_SLICE_SIZE;
-  }
-  else if (mi_memid_is_os(page->memid) || page->memid.memkind == MI_MEM_EXTERNAL) {
-    mi_assert_internal((uint8_t*)page->memid.mem.os.base <= (uint8_t*)page);
-    const ptrdiff_t presize = (uint8_t*)page - (uint8_t*)page->memid.mem.os.base;
-    mi_assert_internal((ptrdiff_t)page->memid.mem.os.size >= presize);
-    return (presize > (ptrdiff_t)page->memid.mem.os.size ? 0 : page->memid.mem.os.size - presize);
-  }
-  else {
-    return 0;
-  }
-}
 
 /* -----------------------------------------------------------
   Arena Allocation
@@ -1292,6 +1278,14 @@ static void mi_arenas_page_free_prim(mi_page_t* page) {
   _mi_arenas_free( mi_page_subproc(page), mi_page_slice_start(page), mi_page_full_size(page), page->memid);
 }
 
+static void _mi_page_callback_release(mi_page_t* page) {
+  if (page->page_callback_accepted) {
+    page->page_callback_accepted = false;
+    mi_heap_t* const heap = page->heap;
+    heap->page_release(mi_page_full_size(page), heap->page_callbacks_arg);
+  }
+}
+
 void _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx) {
   mi_assert_internal(_mi_is_aligned(mi_page_slice_start(page), MI_PAGE_ALIGN));
   mi_assert_internal(_mi_ptr_page(mi_page_start(page))==page);
@@ -1302,6 +1296,7 @@ void _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx) {
   mi_assert_internal(mi_theap_matches_thread(current_theapx));
 
   mi_heap_t* const heap = mi_page_heap(page);
+  _mi_page_callback_release(page);
   mi_theapx_stat_decrease(heap, current_theapx, page_bins[_mi_page_stats_bin(page)], 1);
   mi_theapx_stat_decrease(heap, current_theapx, pages, 1);
   mi_arenas_page_free_prim(page);
@@ -2567,6 +2562,7 @@ static bool mi_heap_delete_page(const mi_heap_t* heap, const mi_heap_area_t* are
     _mi_arenas_page_free(page, theap);
   }
   else {
+    _mi_page_callback_release(page);
     // move the page to `heap_target` as an abandoned page
     // first remove it from the current heap
     const size_t sbin = _mi_page_stats_bin(page);

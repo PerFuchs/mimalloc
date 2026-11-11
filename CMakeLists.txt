@@ -969,6 +969,7 @@ install(FILES include/mimalloc.h DESTINATION ${mi_install_incdir})
 install(FILES include/mimalloc-override.h DESTINATION ${mi_install_incdir})
 install(FILES include/mimalloc-new-delete.h DESTINATION ${mi_install_incdir})
 install(FILES include/mimalloc-stats.h DESTINATION ${mi_install_incdir})
+install(FILES include/mimalloc/page-callbacks.h DESTINATION ${mi_install_incdir}/mimalloc)
 install(FILES cmake/mimalloc-config.cmake DESTINATION ${mi_install_cmakedir})
 install(FILES cmake/mimalloc-config-version.cmake DESTINATION ${mi_install_cmakedir})
 
@@ -1035,7 +1036,7 @@ if (MI_BUILD_TESTS)
   enable_testing()
 
   # static link tests
-  foreach(TEST_NAME api api-fill stress-heaps stress-subprocs stress)
+  foreach(TEST_NAME api api-fill page-callbacks stress-heaps stress-subprocs stress)
     add_executable(mimalloc-test-${TEST_NAME} test/test-${TEST_NAME}.c)
     target_compile_definitions(mimalloc-test-${TEST_NAME} PRIVATE ${mi_defines})
     target_compile_options(mimalloc-test-${TEST_NAME} PRIVATE ${mi_cflags})

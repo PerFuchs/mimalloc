@@ -17,6 +17,10 @@ terms of the MIT license. A copy of the license can be found in the file
 #include "track.h"
 #include "bits.h"
 
+static inline bool _mi_page_callback_rejected(const mi_theap_t* theap) {
+  return (theap->page_callback_rejected != NULL && *theap->page_callback_rejected);
+}
+
 
 // --------------------------------------------------------------------------
 // Compiler defines
@@ -835,6 +839,22 @@ static inline uint8_t* mi_page_area(const mi_page_t* page, size_t* size) {
   if (size) { *size = mi_page_size(page); }
   return mi_page_start(page);
 }
+
+static inline size_t mi_page_full_size(const mi_page_t* page) {
+  if (page->memid.memkind == MI_MEM_ARENA) {
+    return page->memid.mem.arena.slice_count * MI_ARENA_SLICE_SIZE;
+  }
+  else if (mi_memid_is_os(page->memid) || page->memid.memkind == MI_MEM_EXTERNAL) {
+    mi_assert_internal((uint8_t*)page->memid.mem.os.base <= (uint8_t*)page);
+    const ptrdiff_t presize = (uint8_t*)page - (uint8_t*)page->memid.mem.os.base;
+    mi_assert_internal((ptrdiff_t)page->memid.mem.os.size >= presize);
+    return (presize > (ptrdiff_t)page->memid.mem.os.size ? 0 : page->memid.mem.os.size - presize);
+  }
+  else {
+    return 0;
+  }
+}
+
 
 static inline size_t mi_page_info_size(void) {
   return _mi_align_up(sizeof(mi_page_t), MI_MAX_ALIGN_SIZE);

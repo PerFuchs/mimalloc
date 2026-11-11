@@ -709,6 +709,7 @@ static bool mi_page_extend_free(mi_theap_t* theap, mi_page_t* page) {
 mi_decl_nodiscard bool _mi_page_init(mi_theap_t* theap, mi_page_t* page) {
   mi_assert(page != NULL);
   mi_assert(theap!=NULL);
+  page->page_callback_accepted = false;
   // page->heap = (_mi_is_heap_main(_mi_theap_heap(theap)) ? NULL : _mi_theap_heap(theap)); // faster for `mi_page_associated_theap`
   // mi_page_set_theap(page, theap);
 
@@ -754,6 +755,16 @@ mi_decl_nodiscard bool _mi_page_init(mi_theap_t* theap, mi_page_t* page) {
   // initialize an initial free list
   if (!mi_page_extend_free(theap,page)) return false;
   mi_assert(mi_page_immediate_available(page));
+  mi_heap_t* const heap = page->heap;
+  if (heap->page_acquire != NULL) {
+    if (!heap->page_acquire(mi_page_full_size(page), heap->page_callbacks_arg)) {
+      mi_assert_internal(theap->page_callback_rejected != NULL);
+      *theap->page_callback_rejected = true;
+      mi_page_set_theap(page, NULL);
+      return false;
+    }
+    page->page_callback_accepted = true;
+  }
   return true;
 }
 
@@ -856,7 +867,7 @@ static mi_decl_noinline mi_page_t* mi_page_queue_find_free_ex(mi_theap_t* theap,
     _mi_theap_collect_retired(theap, false); // perhaps make a page available
     page = mi_page_fresh(theap, pq);         
     mi_assert_internal(page == NULL || mi_page_immediate_available(page));
-    if (page == NULL && first_try) {
+    if (page == NULL && first_try && !_mi_page_callback_rejected(theap)) {
       // out-of-memory _or_ an abandoned page with free blocks was reclaimed, try once again
       page = mi_page_queue_find_free_ex(theap, pq, false);
       mi_assert_internal(page == NULL || mi_page_immediate_available(page));
@@ -1053,11 +1064,13 @@ static mi_decl_noinline void* mi_malloc_generic_fallback(mi_theap_t* theap, size
   
   // find (or allocate) a page of the right size
   mi_page_t* page = mi_find_page(theap, size, huge_alignment);
+  if (_mi_page_callback_rejected(theap)) return NULL;
   if mi_unlikely(page == NULL) { // first time out of memory, try to collect and retry the allocation once more
     mi_theap_collect(theap, true /* force? */);
     page = mi_find_page(theap, size, huge_alignment);
   }
 
+  if (_mi_page_callback_rejected(theap)) return NULL;
   if mi_unlikely(page == NULL) { // out of memory
     const size_t req_size = size - MI_PADDING_SIZE;  // correct for padding_size in case of an overflow on `size`
     _mi_error_message(ENOMEM, "unable to allocate memory (%zu bytes)\n", req_size);
@@ -1088,7 +1101,7 @@ static mi_decl_noinline void* mi_malloc_generic_fallback(mi_theap_t* theap, size
 // very large requested alignments in which case we use a huge singleton page.
 // Note: we put `bool zero, size_t huge_alignment` into one parameter (with zero in the low bit)
 // to use 4 parameters which compiles better on msvc for the malloc fast path.
-void* _mi_malloc_generic(mi_theap_t* theap, size_t size, size_t zero_huge_alignment, mi_page_t** ppage) mi_attr_noexcept
+static void* mi_malloc_generic_with_callbacks(mi_theap_t* theap, size_t size, size_t zero_huge_alignment, mi_page_t** ppage) mi_attr_noexcept
 {
   #if !MI_THEAP_INITASNULL
   mi_assert_internal(theap != NULL);
@@ -1112,6 +1125,20 @@ void* _mi_malloc_generic(mi_theap_t* theap, size_t size, size_t zero_huge_alignm
       }
     }
   }
+  if (_mi_page_callback_rejected(theap)) return NULL;
   // otherwise fallback
   return mi_malloc_generic_fallback(theap,size,zero, huge_alignment,ppage);
+}
+
+void* _mi_malloc_generic(mi_theap_t* theap, size_t size, size_t zero_huge_alignment, mi_page_t** ppage) mi_attr_noexcept {
+  if (!mi_theap_is_initialized(theap)) {
+    theap = mi_malloc_generic_admin(theap);
+    if (theap == NULL) return NULL;
+  }
+  bool rejected = false;
+  bool* const previous = theap->page_callback_rejected;
+  theap->page_callback_rejected = &rejected;
+  void* const result = mi_malloc_generic_with_callbacks(theap, size, zero_huge_alignment, ppage);
+  theap->page_callback_rejected = previous;
+  return result;
 }
