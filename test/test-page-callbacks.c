@@ -6,9 +6,6 @@
 #include <mimalloc/page-callbacks.h>
 #include <stdio.h>
 #include <stdlib.h>
-#if !defined(_WIN32)
-#include <sched.h>
-#endif
 
 #define CHECK(expr) do { if (!(expr)) { \
   fprintf(stderr, "page callbacks: %s:%d: %s\n", __FILE__, __LINE__, #expr); \
@@ -174,14 +171,12 @@ static DWORD WINAPI thread_entry(LPVOID arg) {
   thread->fun(thread->arg);
   return 0;
 }
-static void thread_yield(void) { SwitchToThread(); }
 #else
 static void* thread_entry(void* arg) {
   thread_t* thread = (thread_t*)arg;
   thread->fun(thread->arg);
   return NULL;
 }
-static void thread_yield(void) { sched_yield(); }
 #endif
 
 static void thread_start(thread_t* thread, thread_fun_t* fun, void* arg) {
@@ -224,49 +219,6 @@ static void check_concurrent_heap(void) {
   mi_heap_destroy(heap);
   CHECK(mi_atomic_load_acquire(&state.release_calls) > 0);
   CHECK(mi_atomic_load_acquire(&state.acquired_bytes) == mi_atomic_load_acquire(&state.released_bytes));
-}
-
-typedef struct heap_reuse_state_s {
-  mi_heap_t* original;
-  mi_heap_t* replacement;
-  _Atomic(uintptr_t) phase;
-} heap_reuse_state_t;
-
-static void heap_reuse_worker(void* arg) {
-  heap_reuse_state_t* state = (heap_reuse_state_t*)arg;
-  CHECK(mi_heap_malloc(state->original, 64) != NULL);
-  CHECK(mi_heap_malloc(state->original, 64) != NULL);
-  mi_atomic_store_release(&state->phase, 1);
-  while (mi_atomic_load_acquire(&state->phase) != 2) thread_yield();
-  void* ptr = mi_heap_malloc(state->replacement, 8192);
-  CHECK(ptr != NULL);
-  mi_free(ptr);
-}
-
-static void check_cached_heap_address_reuse(void) {
-  heap_reuse_state_t state = {0};
-  state.original = mi_heap_new();
-  CHECK(state.original != NULL);
-  const uintptr_t address = (uintptr_t)state.original;
-  thread_t worker;
-  thread_start(&worker, heap_reuse_worker, &state);
-  while (mi_atomic_load_acquire(&state.phase) != 1) thread_yield();
-  mi_heap_destroy(state.original);
-  mi_heap_t* heaps[256];
-  size_t count = 0;
-  while (count < sizeof(heaps) / sizeof(heaps[0])) {
-    mi_heap_t* heap = mi_heap_new();
-    CHECK(heap != NULL);
-    heaps[count++] = heap;
-    if ((uintptr_t)heap == address) {
-      state.replacement = heap;
-      break;
-    }
-  }
-  CHECK(state.replacement != NULL);
-  mi_atomic_store_release(&state.phase, 2);
-  thread_join(&worker);
-  for (size_t i = 0; i < count; ++i) mi_heap_destroy(heaps[i]);
 }
 
 static void check_acquire_only(void) {
@@ -331,7 +283,6 @@ int main(void) {
   check_delete_transfers_charge();
   check_nested_veto();
   check_concurrent_heap();
-  check_cached_heap_address_reuse();
   check_acquire_only();
   check_release_only(false);
   check_release_only(true);

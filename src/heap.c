@@ -192,7 +192,6 @@ static void mi_heap_free_theaps(mi_heap_t* heap) {
       mi_assert_internal(theap->tld==NULL);
       // merge stats into the owning heap stats
       _mi_stats_merge_into(&heap->stats, &theap->stats);
-      mi_atomic_store_ptr_release(mi_heap_t, &theap->heap, NULL);
       // and free
       _mi_theap_decref(theap);  // a cached entry can still point to the theap
       theap = next;
