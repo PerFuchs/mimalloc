@@ -24,7 +24,6 @@ terms of the MIT license. A copy of the license can be found in the file
 
 
 #include <mimalloc-stats.h>
-#include <mimalloc/page-callbacks.h>
 #include <stddef.h>   // ptrdiff_t
 #include <stdint.h>   // uintptr_t, uint16_t, etc
 #include <stdbool.h>  // bool
@@ -626,7 +625,7 @@ typedef struct mi_heap_s {
   int                   numa_node;                      // if >=0, prefer this numa node for allocations
 
   mi_page_acquire_fun*  page_acquire;                   // optional page acquisition callback; false vetoes the allocation
-  mi_page_release_fun*  page_release;                   // optional callback when an accepted page leaves this heap
+  mi_page_release_fun*  page_release;                   // optional callback on page return, destruction, or transfer
   void*                 page_callbacks_arg;             // user argument for the page callbacks
 
   mi_theap_t*           theaps;                         // list of all thread-local theaps belonging to this heap (using the `hnext`/`hprev` fields)
