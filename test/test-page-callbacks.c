@@ -22,7 +22,6 @@ typedef struct callback_state_s {
   _Atomic(uintptr_t) release_calls;
   _Atomic(uintptr_t) acquired_bytes;
   _Atomic(uintptr_t) released_bytes;
-  _Atomic(uintptr_t) done_calls;
   _Atomic(uintptr_t) vetoed;
   _Atomic(uintptr_t) deferred_after_veto;
   _Atomic(uintptr_t) errors;
@@ -48,14 +47,8 @@ static void release_page(size_t bytes, void* arg) {
   mi_atomic_increment_relaxed(&state->release_calls);
 }
 
-static void callbacks_done(void* arg) {
-  callback_state_t* state = (callback_state_t*)arg;
-  CHECK(mi_atomic_load_acquire(&state->acquired_bytes) == mi_atomic_load_acquire(&state->released_bytes));
-  CHECK(mi_atomic_increment_relaxed(&state->done_calls) == 0);
-}
-
 static mi_heap_t* new_heap(callback_state_t* state) {
-  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(acquire_page, release_page, state, callbacks_done);
+  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(acquire_page, release_page, state);
   CHECK(heap != NULL);
   return heap;
 }
@@ -101,7 +94,7 @@ static void check_veto(size_t size, size_t alignment, bool zero) {
   mi_free(ptr);
   mi_heap_collect(heap, true);
   mi_heap_destroy(heap);
-  CHECK(mi_atomic_load_acquire(&state.done_calls) == 1);
+  CHECK(mi_atomic_load_acquire(&state.acquired_bytes) == mi_atomic_load_acquire(&state.released_bytes));
   CHECK(mi_atomic_load_acquire(&state.release_calls) == 1);
 }
 
@@ -116,10 +109,9 @@ static void check_release_before_destroy(void) {
   CHECK(mi_atomic_load_acquire(&state.release_calls) == 1);
   CHECK(mi_atomic_load_acquire(&state.acquired_bytes) == mi_atomic_load_acquire(&state.released_bytes));
   const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
-  CHECK(mi_atomic_load_acquire(&state.done_calls) == 0);
   mi_heap_destroy(heap);
   CHECK(mi_atomic_load_acquire(&state.released_bytes) == released);
-  CHECK(mi_atomic_load_acquire(&state.done_calls) == 1);
+  CHECK(mi_atomic_load_acquire(&state.acquired_bytes) == mi_atomic_load_acquire(&state.released_bytes));
 }
 
 static void check_delete_transfers_charge(void) {
@@ -130,7 +122,7 @@ static void check_delete_transfers_charge(void) {
   CHECK(ptr != NULL);
   CHECK(mi_atomic_load_acquire(&state.acquired_bytes) > 0);
   mi_heap_delete(heap);
-  CHECK(mi_atomic_load_acquire(&state.done_calls) == 1);
+  CHECK(mi_atomic_load_acquire(&state.acquired_bytes) == mi_atomic_load_acquire(&state.released_bytes));
   const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
   mi_free(ptr);
   mi_collect(true);
@@ -156,14 +148,14 @@ static bool nested_acquire(size_t bytes, void* arg) {
 static void check_nested_veto(void) {
   nested_state_t state = {0};
   mi_atomic_store_release(&state.accounting.accept, 1);
-  state.heap = _mi_heap_new_with_page_callbacks(nested_acquire, release_page, &state, callbacks_done);
+  state.heap = _mi_heap_new_with_page_callbacks(nested_acquire, release_page, &state);
   CHECK(state.heap != NULL);
   void* ptr = mi_heap_malloc(state.heap, 64);
   CHECK(ptr != NULL);
   CHECK(state.nested_rejected);
   mi_free(ptr);
   mi_heap_destroy(state.heap);
-  CHECK(mi_atomic_load_acquire(&state.accounting.done_calls) == 1);
+  CHECK(mi_atomic_load_acquire(&state.accounting.acquired_bytes) == mi_atomic_load_acquire(&state.accounting.released_bytes));
 }
 
 typedef void (thread_fun_t)(void*);
@@ -232,7 +224,7 @@ static void check_concurrent_heap(void) {
   for (size_t i = 0; i < 8; ++i) thread_join(&threads[i]);
   mi_heap_destroy(heap);
   CHECK(mi_atomic_load_acquire(&state.release_calls) > 0);
-  CHECK(mi_atomic_load_acquire(&state.done_calls) == 1);
+  CHECK(mi_atomic_load_acquire(&state.acquired_bytes) == mi_atomic_load_acquire(&state.released_bytes));
 }
 
 typedef struct heap_reuse_state_s {
@@ -281,9 +273,8 @@ static void check_cached_heap_address_reuse(void) {
 static void check_callback_pair(void) {
   callback_state_t state = {0};
   errno = 0;
-  CHECK(_mi_heap_new_with_page_callbacks(acquire_page, NULL, &state, callbacks_done) == NULL);
+  CHECK(_mi_heap_new_with_page_callbacks(acquire_page, NULL, &state) == NULL);
   CHECK(errno == EINVAL);
-  CHECK(mi_atomic_load_acquire(&state.done_calls) == 0);
 }
 
 int main(void) {

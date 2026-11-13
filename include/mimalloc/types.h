@@ -639,7 +639,6 @@ typedef struct mi_heap_s {
   mi_stats_t            stats;                           // statistics for this heap; periodically updated by merging from each theap
   bool                 (*page_acquire)(size_t bytes, void* arg);
   void                 (*page_release)(size_t bytes, void* arg);
-  void                 (*page_callbacks_done)(void* arg);
   void*                  page_callbacks_arg;
 } mi_heap_t;
 

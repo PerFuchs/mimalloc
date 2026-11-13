@@ -110,7 +110,6 @@ void _mi_heap_init(mi_heap_t* heap, mi_thread_local_t theap_slot, mi_subproc_t* 
   heap->numa_node = -1; // no initial affinity
   heap->page_acquire = NULL;
   heap->page_release = NULL;
-  heap->page_callbacks_done = NULL;
   heap->page_callbacks_arg = NULL;
   mi_stats_header_init(&heap->stats);
   mi_lock_init(&heap->theaps_lock);
@@ -164,7 +163,7 @@ mi_heap_t* mi_heap_new(void) {
 }
 
 mi_heap_t* _mi_heap_new_with_page_callbacks(mi_page_acquire_fun* acquire, mi_page_release_fun* release,
-                                         void* arg, mi_page_callbacks_done_fun* done) mi_attr_noexcept {
+                                         void* arg) mi_attr_noexcept {
   if ((acquire == NULL) != (release == NULL)) {
     errno = EINVAL;
     return NULL;
@@ -174,7 +173,6 @@ mi_heap_t* _mi_heap_new_with_page_callbacks(mi_page_acquire_fun* acquire, mi_pag
     heap->page_acquire = acquire;
     heap->page_release = release;
     heap->page_callbacks_arg = arg;
-    heap->page_callbacks_done = done;
   }
   return heap;
 }
@@ -244,9 +242,6 @@ static void mi_heap_free(mi_heap_t* heap, bool acquire_heaps_lock) {
   mi_lock_done(&heap->arena_pages_lock);
   if (!_mi_is_process_heap_main(heap)) { 
     _mi_thread_local_free(heap->theap);
-    if (heap->page_callbacks_done != NULL) {
-      heap->page_callbacks_done(heap->page_callbacks_arg);
-    }
     _mi_free_subproc_safe(heap); 
   }
 }
