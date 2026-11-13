@@ -24,6 +24,7 @@ terms of the MIT license. A copy of the license can be found in the file
 
 
 #include <mimalloc-stats.h>
+#include <mimalloc/page-callbacks.h>
 #include <stddef.h>   // ptrdiff_t
 #include <stdint.h>   // uintptr_t, uint16_t, etc
 #include <stdbool.h>  // bool
@@ -624,6 +625,10 @@ typedef struct mi_heap_s {
   mi_arena_t*           exclusive_arena;                // if the heap should only allocate from a specific arena (or NULL)
   int                   numa_node;                      // if >=0, prefer this numa node for allocations
 
+  mi_page_acquire_fun*  page_acquire;                   // optional page acquisition callback; false vetoes the allocation
+  mi_page_release_fun*  page_release;                   // optional callback when an accepted page leaves this heap
+  void*                 page_callbacks_arg;             // user argument for the page callbacks
+
   mi_theap_t*           theaps;                         // list of all thread-local theaps belonging to this heap (using the `hnext`/`hprev` fields)
   mi_lock_t             theaps_lock;                    // lock for the theaps list operations
 
@@ -635,9 +640,6 @@ typedef struct mi_heap_s {
   mi_lock_t             arena_pages_lock;                // lock to update the arena_pages array
   mi_memid_t            memid;                           // provenance of the heap memory
   mi_stats_t            stats;                           // statistics for this heap; periodically updated by merging from each theap
-  bool                 (*page_acquire)(size_t bytes, void* arg);
-  void                 (*page_release)(size_t bytes, void* arg);
-  void*                  page_callbacks_arg;
 } mi_heap_t;
 
 
