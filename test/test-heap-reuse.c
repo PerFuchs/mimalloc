@@ -1,25 +1,21 @@
 /* Heap cache regression test, distributed under the MIT license (see LICENSE). */
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <mimalloc.h>
-#include <mimalloc/atomic.h>
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <pthread.h>
+#include "mimalloc.h"
+#include "mimalloc/atomic.h"
+#include "testhelper.h"
+#if !defined(_WIN32)
 #include <sched.h>
 #endif
 
-#define CHECK(expr) do { if (!(expr)) { \
-  fprintf(stderr, "heap reuse: %s:%d: %s\n", __FILE__, __LINE__, #expr); \
-  abort(); \
-} } while (0)
-
-typedef void (thread_fun_t)(void*);
+// ---------------------------------------------------------------------------
+// Thread helpers (start all workers before joining)
+// ---------------------------------------------------------------------------
+typedef bool (thread_fun_t)(void*);
 typedef struct thread_s {
   thread_fun_t* fun;
   void* arg;
+  bool result;
 #if defined(_WIN32)
   HANDLE handle;
 #else
@@ -30,86 +26,112 @@ typedef struct thread_s {
 #if defined(_WIN32)
 static DWORD WINAPI thread_entry(LPVOID arg) {
   thread_t* thread = (thread_t*)arg;
-  thread->fun(thread->arg);
+  thread->result = thread->fun(thread->arg);
   return 0;
 }
-static void thread_yield(void) { SwitchToThread(); }
 #else
 static void* thread_entry(void* arg) {
   thread_t* thread = (thread_t*)arg;
-  thread->fun(thread->arg);
+  thread->result = thread->fun(thread->arg);
   return NULL;
 }
+#endif
+
+static bool thread_start(thread_t* thread, thread_fun_t* fun, void* arg) {
+  thread->fun = fun;
+  thread->arg = arg;
+  thread->result = false;
+#if defined(_WIN32)
+  thread->handle = CreateThread(NULL, 0, thread_entry, thread, 0, NULL);
+  return (thread->handle != NULL);
+#else
+  return (pthread_create(&thread->handle, NULL, thread_entry, thread) == 0);
+#endif
+}
+
+static bool thread_join(thread_t* thread) {
+  // A failed join cannot safely return while the worker still uses stack data.
+#if defined(_WIN32)
+  if (WaitForSingleObject(thread->handle, INFINITE) != WAIT_OBJECT_0) {
+    fprintf(stderr, "unable to join test thread\n");
+    abort();
+  }
+  const bool closed = (CloseHandle(thread->handle) != 0);
+  return (thread->result && closed);
+#else
+  if (pthread_join(thread->handle, NULL) != 0) {
+    fprintf(stderr, "unable to join test thread\n");
+    abort();
+  }
+  return thread->result;
+#endif
+}
+
+#if defined(_WIN32)
+static void thread_yield(void) { SwitchToThread(); }
+#else
 static void thread_yield(void) { sched_yield(); }
 #endif
 
-static void thread_start(thread_t* thread, thread_fun_t* fun, void* arg) {
-  thread->fun = fun;
-  thread->arg = arg;
-#if defined(_WIN32)
-  thread->handle = CreateThread(NULL, 0, thread_entry, thread, 0, NULL);
-  CHECK(thread->handle != NULL);
-#else
-  CHECK(pthread_create(&thread->handle, NULL, thread_entry, thread) == 0);
-#endif
-}
-
-static void thread_join(thread_t* thread) {
-#if defined(_WIN32)
-  CHECK(WaitForSingleObject(thread->handle, INFINITE) == WAIT_OBJECT_0);
-  CHECK(CloseHandle(thread->handle));
-#else
-  CHECK(pthread_join(thread->handle, NULL) == 0);
-#endif
-}
-
+// ---------------------------------------------------------------------------
+// Heap address reuse
+// ---------------------------------------------------------------------------
 typedef struct heap_reuse_state_s {
   mi_heap_t* original;
   mi_heap_t* replacement;
   _Atomic(uintptr_t) phase;
 } heap_reuse_state_t;
 
-static void heap_reuse_worker(void* arg) {
+static bool heap_reuse_worker(void* arg) {
   heap_reuse_state_t* state = (heap_reuse_state_t*)arg;
-  CHECK(mi_heap_malloc(state->original, 64) != NULL);
-  CHECK(mi_heap_malloc(state->original, 64) != NULL);
+  bool result = (mi_heap_malloc(state->original, 64) != NULL);
+  result &= (mi_heap_malloc(state->original, 64) != NULL);
   mi_atomic_store_release(&state->phase, 1);
   // Keep the cached theap alive without using the heap during destruction.
   while (mi_atomic_load_acquire(&state->phase) != 2) thread_yield();
+  if (state->replacement == NULL) return false;
   // Use a different size class so old cached blocks cannot satisfy the request.
   void* ptr = mi_heap_malloc(state->replacement, 8192);
-  CHECK(ptr != NULL);
+  result &= (ptr != NULL);
   mi_free(ptr);
+  return result;
 }
 
-static void check_cached_heap_address_reuse(void) {
+static bool test_cached_heap_address_reuse(void) {
   heap_reuse_state_t state = {0};
   state.original = mi_heap_new();
-  CHECK(state.original != NULL);
+  if (state.original == NULL) return false;
   const uintptr_t address = (uintptr_t)state.original;
   thread_t worker;
-  thread_start(&worker, heap_reuse_worker, &state);
+  if (!thread_start(&worker, heap_reuse_worker, &state)) {
+    mi_heap_destroy(state.original);
+    return false;
+  }
   while (mi_atomic_load_acquire(&state.phase) != 1) thread_yield();
   mi_heap_destroy(state.original);
   mi_heap_t* heaps[256];
   size_t count = 0;
   while (count < sizeof(heaps) / sizeof(heaps[0])) {
     mi_heap_t* heap = mi_heap_new();
-    CHECK(heap != NULL);
+    if (heap == NULL) break;
     heaps[count++] = heap;
     if ((uintptr_t)heap == address) {
       state.replacement = heap;
       break;
     }
   }
-  CHECK(state.replacement != NULL);
+  bool result = (state.replacement != NULL);
   mi_atomic_store_release(&state.phase, 2);
-  thread_join(&worker);
+  result &= thread_join(&worker);
   for (size_t i = 0; i < count; ++i) mi_heap_destroy(heaps[i]);
+  return result;
 }
 
+// ---------------------------------------------------------------------------
+// Main testing
+// ---------------------------------------------------------------------------
 int main(void) {
-  check_cached_heap_address_reuse();
-  puts("heap reuse test passed");
-  return 0;
+  mi_option_disable(mi_option_verbose);
+  CHECK("cached-heap-address-reuse", test_cached_heap_address_reuse());
+  return print_test_summary();
 }
