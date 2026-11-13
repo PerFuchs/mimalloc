@@ -239,6 +239,27 @@ struct mi_heap_s;
 typedef struct mi_heap_s mi_heap_t;
 
 mi_decl_nodiscard mi_decl_export mi_heap_t* mi_heap_new(void);
+
+// With both callbacks provided, account for pages by adding acquired bytes and
+// subtracting released bytes. The matching-call and zero-balance guarantees below
+// apply to that pair of callbacks.
+// Called before a new page is added to the heap. `bytes` is the full page span, including
+// metadata and padding.
+// Returning `false` makes the allocation return NULL. The callback is called at most once per allocation. Returning `true` means there will be a matching `mi_page_release_fun` call for this page.
+typedef bool (mi_cdecl mi_page_acquire_fun)(size_t bytes, void* arg);
+
+// Called once when a page is returned, destroyed, or transferred out of the heap.
+// `bytes` has the same meaning as in acquire. Cached and abandoned pages stay charged.
+//  `bytes` tallied up with `mi_page_acquire_fun` `bytes` result in zero over the lifetime of the heap.
+typedef void (mi_cdecl mi_page_release_fun)(size_t bytes, void* arg);
+
+// Create a heap with fixed page callbacks. Either callback may be NULL: without
+// acquire every page is accepted, and without release no notification is made.
+// Callbacks can run concurrently on different threads and must not throw exceptions.
+// The caller owns arg and must keep it valid until mi_heap_delete/destroy returns,
+// after the last release callback.
+mi_decl_nodiscard mi_decl_export mi_heap_t* _mi_heap_new_with_page_callbacks(mi_page_acquire_fun* acquire, mi_page_release_fun* release, void* arg) mi_attr_noexcept;
+
 mi_decl_export void mi_heap_delete(mi_heap_t* heap);            // move live blocks to the main heap
 mi_decl_export void mi_heap_destroy(mi_heap_t* heap);           // free all live blocks
 mi_decl_export void mi_heap_set_numa_affinity(mi_heap_t* heap, int numa_node);

@@ -55,6 +55,13 @@ bool test_stl_theap_allocator3(void);
 bool test_stl_theap_allocator4(void);
 
 static bool test_zero_aligned_first(void);
+static bool test_veto(size_t size, size_t alignment, bool zero);
+static bool test_release_before_destroy(void);
+static bool test_delete_transfers_charge(void);
+static bool test_page_reclaim(void);
+static bool test_acquire_only(void);
+static bool test_release_only(bool transfer);
+static bool test_no_callbacks(void);
 
 static bool mem_has_vals(const uint8_t* p, size_t size, uint8_t val) {
   if (p==NULL) return false;
@@ -540,6 +547,25 @@ int main(void) {
 
   
   // ---------------------------------------------------
+  // Page callbacks
+  // ---------------------------------------------------
+  CHECK("page-callback-veto-tiny", test_veto(1, 0, false));
+  CHECK("page-callback-veto-small", test_veto(37, 0, false));
+  CHECK("page-callback-veto-8KiB", test_veto(8192, 0, false));
+  CHECK("page-callback-veto-64KiB", test_veto(65536, 0, false));
+  CHECK("page-callback-veto-1MiB", test_veto(1024 * 1024, 0, false));
+  CHECK("page-callback-veto-8MiB", test_veto(8 * 1024 * 1024, 0, false));
+  CHECK("page-callback-veto-aligned", test_veto(97, 1024 * 1024, false));
+  CHECK("page-callback-veto-zero", test_veto(128, 0, true));
+  CHECK("page-callback-release-before-destroy", test_release_before_destroy());
+  CHECK("page-callback-delete-transfers-charge", test_delete_transfers_charge());
+  CHECK("page-callback-reclaim", test_page_reclaim());
+  CHECK("page-callback-acquire-only", test_acquire_only());
+  CHECK("page-callback-release-only-destroy", test_release_only(false));
+  CHECK("page-callback-release-only-delete", test_release_only(true));
+  CHECK("page-callback-none", test_no_callbacks());
+
+  // ---------------------------------------------------
   // Threads
   // ---------------------------------------------------
   CHECK_BODY("zero_aligned_first") {
@@ -722,5 +748,257 @@ static bool test_zero_aligned_first(void) {
   return res;
 }
 
+// ---------------------------------------------------------------------------
+// Callback helpers
+// ---------------------------------------------------------------------------
+typedef struct callback_state_s {
+  _Atomic(uintptr_t) accept;
+  _Atomic(uintptr_t) acquire_calls;
+  _Atomic(uintptr_t) release_calls;
+  _Atomic(uintptr_t) acquired_bytes;
+  _Atomic(uintptr_t) released_bytes;
+  _Atomic(uintptr_t) vetoed;
+  _Atomic(uintptr_t) deferred_after_veto;
+  _Atomic(uintptr_t) errors;
+  _Atomic(uintptr_t) callback_errors;
+} callback_state_t;
 
+static bool acquire_page(size_t bytes, void* arg) {
+  callback_state_t* state = (callback_state_t*)arg;
+  assert(bytes > 0);
+  mi_atomic_increment_relaxed(&state->acquire_calls);
+  if (!mi_atomic_load_acquire(&state->accept)) {
+    mi_atomic_store_release(&state->vetoed, 1);
+    return false;
+  }
+  mi_atomic_add_relaxed(&state->acquired_bytes, bytes);
+  return true;
+}
 
+static void observe_release(size_t bytes, void* arg) {
+  callback_state_t* state = (callback_state_t*)arg;
+  assert(bytes > 0);
+  mi_atomic_add_relaxed(&state->released_bytes, bytes);
+  mi_atomic_increment_relaxed(&state->release_calls);
+}
+
+static void release_page(size_t bytes, void* arg) {
+  callback_state_t* state = (callback_state_t*)arg;
+  assert(bytes > 0);
+  const uintptr_t before = mi_atomic_add_relaxed(&state->released_bytes, bytes);
+  if (before + bytes > mi_atomic_load_acquire(&state->acquired_bytes)) {
+    mi_atomic_increment_relaxed(&state->callback_errors);
+  }
+  mi_atomic_increment_relaxed(&state->release_calls);
+}
+
+// Error counters default to zero; callers specify only the expected call counts.
+static bool check_state(callback_state_t* state, uintptr_t expected_acquire_calls, uintptr_t expected_release_calls) {
+  const uintptr_t acquire_calls = mi_atomic_load_acquire(&state->acquire_calls);
+  const uintptr_t release_calls = mi_atomic_load_acquire(&state->release_calls);
+  const uintptr_t deferred_after_veto = mi_atomic_load_acquire(&state->deferred_after_veto);
+  const uintptr_t errors = mi_atomic_load_acquire(&state->errors);
+  const uintptr_t callback_errors = mi_atomic_load_acquire(&state->callback_errors);
+  const bool result = (acquire_calls == expected_acquire_calls && release_calls == expected_release_calls &&
+                       deferred_after_veto == 0 && errors == 0 && callback_errors == 0);
+  if (!result) {
+    fprintf(stderr, "page callbacks: acquire calls %zu (expected %zu), release calls %zu (expected %zu), "
+                    "deferred calls after veto %zu, allocator errors %zu, callback errors %zu (expected zero)\n",
+            (size_t)acquire_calls, (size_t)expected_acquire_calls, (size_t)release_calls, (size_t)expected_release_calls,
+            (size_t)deferred_after_veto, (size_t)errors, (size_t)callback_errors);
+  }
+  return result;
+}
+
+static bool accounting_is_balanced(callback_state_t* state) {
+  const uintptr_t acquired = mi_atomic_load_acquire(&state->acquired_bytes);
+  const uintptr_t released = mi_atomic_load_acquire(&state->released_bytes);
+  if (acquired != released) {
+    fprintf(stderr, "page callbacks: acquired bytes %zu != released bytes %zu\n", (size_t)acquired, (size_t)released);
+  }
+  return (acquired == released);
+}
+
+static mi_heap_t* new_heap(callback_state_t* state) {
+  return _mi_heap_new_with_page_callbacks(acquire_page, release_page, state);
+}
+
+static void deferred_free(bool force, unsigned long long heartbeat, void* arg) {
+  (void)force;
+  (void)heartbeat;
+  callback_state_t* state = (callback_state_t*)arg;
+  if (mi_atomic_load_acquire(&state->vetoed)) {
+    mi_atomic_increment_relaxed(&state->deferred_after_veto);
+  }
+}
+
+static void error_handler(int error, void* arg) {
+  (void)error;
+  callback_state_t* state = (callback_state_t*)arg;
+  mi_atomic_increment_relaxed(&state->errors);
+}
+
+// ---------------------------------------------------------------------------
+// Page acquisition and release
+// ---------------------------------------------------------------------------
+static bool test_veto(size_t size, size_t alignment, bool zero) {
+  callback_state_t state = {0};
+  mi_heap_t* heap = new_heap(&state);
+  if (heap == NULL) return false;
+  mi_register_deferred_free(deferred_free, &state);
+  mi_register_error(error_handler, &state);
+  void* ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
+                              : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
+  bool result = check_state(&state, 1, 0);
+  result &= (ptr == NULL);
+  mi_register_deferred_free(NULL, NULL);
+  mi_register_error(NULL, NULL);
+  mi_free(ptr);
+  mi_atomic_store_release(&state.accept, 1);
+  ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
+                       : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
+  if (ptr == NULL) {
+    fprintf(stderr, "page callbacks: recovery allocation failed (size %zu, alignment %zu, zero %d)\n", size, alignment, (int)zero);
+    mi_heap_destroy(heap);
+    return false;
+  }
+  result &= check_state(&state, 2, 0);
+  if (alignment != 0) result &= ((uintptr_t)ptr % alignment == 0);
+  if (zero) {
+    for (size_t i = 0; i < size; ++i) result &= (((unsigned char*)ptr)[i] == 0);
+  }
+  mi_free(ptr);
+  mi_heap_collect(heap, true);
+  mi_heap_destroy(heap);
+  result &= check_state(&state, 2, 1);
+  return (result && accounting_is_balanced(&state));
+}
+
+static bool test_release_before_destroy(void) {
+  callback_state_t state = {0};
+  mi_atomic_store_release(&state.accept, 1);
+  mi_heap_t* heap = new_heap(&state);
+  if (heap == NULL) return false;
+  void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
+  if (ptr == NULL) {
+    mi_heap_destroy(heap);
+    return false;
+  }
+  mi_free(ptr);
+  mi_heap_collect(heap, true);
+  bool result = (check_state(&state, 1, 1) && accounting_is_balanced(&state));
+  const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
+  mi_heap_destroy(heap);
+  result &= check_state(&state, 1, 1);
+  return (result && mi_atomic_load_acquire(&state.released_bytes) == released && accounting_is_balanced(&state));
+}
+
+static bool test_delete_transfers_charge(void) {
+  callback_state_t state = {0};
+  mi_atomic_store_release(&state.accept, 1);
+  mi_heap_t* heap = new_heap(&state);
+  if (heap == NULL) return false;
+  void* ptr = mi_heap_malloc(heap, 64);
+  if (ptr == NULL) {
+    mi_heap_destroy(heap);
+    return false;
+  }
+  bool result = (mi_atomic_load_acquire(&state.acquired_bytes) > 0);
+  mi_heap_delete(heap);
+  result &= (check_state(&state, 1, 1) && accounting_is_balanced(&state));
+  const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
+  mi_free(ptr);
+  mi_collect(true);
+  result &= check_state(&state, 1, 1);
+  return (result && mi_atomic_load_acquire(&state.released_bytes) == released && accounting_is_balanced(&state));
+}
+
+// ---------------------------------------------------------------------------
+// Reclaim an abandoned page without acquiring it again
+// ---------------------------------------------------------------------------
+static mi_heap_t* page_reclaim_heap; // shared only by two sequential workers
+
+static bool abandon_page_worker(void) {
+  // Exercise reusable pages instead of guarded singleton allocations.
+  mi_theap_guarded_set_sample_rate(mi_heap_theap(page_reclaim_heap), 0, 0);
+  // The live block keeps the page charged when this thread exits.
+  return (mi_heap_malloc(page_reclaim_heap, 37) != NULL);
+}
+
+static bool reclaim_page_worker(void) {
+  mi_theap_guarded_set_sample_rate(mi_heap_theap(page_reclaim_heap), 0, 0);
+  void* ptr = mi_heap_malloc(page_reclaim_heap, 37);
+  const bool result = (ptr != NULL);
+  mi_free(ptr);
+  return result;
+}
+
+static bool test_page_reclaim(void) {
+  callback_state_t state = {0};
+  mi_atomic_store_release(&state.accept, 1);
+  page_reclaim_heap = new_heap(&state);
+  if (page_reclaim_heap == NULL) return false;
+  bool result = mi_run_on_thread(&abandon_page_worker);
+  result &= check_state(&state, 1, 0);
+  // Reclamation must succeed even when acquiring a new page would be rejected.
+  mi_atomic_store_release(&state.accept, 0);
+  if (result) result = mi_run_on_thread(&reclaim_page_worker);
+  result &= check_state(&state, 1, 0);
+  mi_heap_destroy(page_reclaim_heap);
+  page_reclaim_heap = NULL;
+  result &= check_state(&state, 1, 1);
+  return (result && accounting_is_balanced(&state));
+}
+
+// ---------------------------------------------------------------------------
+// Independently optional callbacks
+// ---------------------------------------------------------------------------
+static bool test_acquire_only(void) {
+  callback_state_t state = {0};
+  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(acquire_page, NULL, &state);
+  if (heap == NULL) return false;
+  void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
+  bool result = check_state(&state, 1, 0);
+  result &= (ptr == NULL && mi_atomic_load_acquire(&state.acquired_bytes) == 0);
+  mi_free(ptr);
+  mi_atomic_store_release(&state.accept, 1);
+  ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
+  result &= (ptr != NULL && mi_atomic_load_acquire(&state.acquired_bytes) > 0);
+  mi_free(ptr);
+  mi_heap_collect(heap, true);
+  mi_heap_destroy(heap);
+  result &= check_state(&state, 2, 0);
+  return result;
+}
+
+static bool test_release_only(bool transfer) {
+  callback_state_t state = {0};
+  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(NULL, observe_release, &state);
+  if (heap == NULL) return false;
+  void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
+  if (ptr == NULL) {
+    mi_heap_destroy(heap);
+    return false;
+  }
+  bool result = check_state(&state, 0, 0);
+  if (transfer) mi_heap_delete(heap);
+  else mi_heap_destroy(heap);
+  result &= check_state(&state, 0, 1);
+  const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
+  result &= (released > 0);
+  if (transfer) {
+    mi_free(ptr);
+    mi_collect(true);
+    result &= check_state(&state, 0, 1);
+    result &= (mi_atomic_load_acquire(&state.released_bytes) == released);
+  }
+  return result;
+}
+
+static bool test_no_callbacks(void) {
+  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(NULL, NULL, NULL);
+  if (heap == NULL) return false;
+  bool result = (mi_heap_malloc(heap, 64) != NULL);
+  mi_heap_destroy(heap);
+  return result;
+}

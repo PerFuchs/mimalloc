@@ -107,6 +107,9 @@ void _mi_heap_init(mi_heap_t* heap, mi_thread_local_t theap_slot, mi_subproc_t* 
   heap->heap_seq = mi_atomic_increment_relaxed(&subproc->heap_total_count);
   heap->exclusive_arena = _mi_arena_from_id(exclusive_arena_id);
   heap->numa_node = -1; // no initial affinity
+  heap->page_acquire = NULL;
+  heap->page_release = NULL;
+  heap->page_callbacks_arg = NULL;
   mi_stats_header_init(&heap->stats);
   mi_lock_init(&heap->theaps_lock);
   mi_lock_init(&heap->os_abandoned_pages_lock);
@@ -156,6 +159,17 @@ mi_heap_t* mi_heap_new_in_arena(mi_arena_id_t exclusive_arena_id) {
 
 mi_heap_t* mi_heap_new(void) {
   return mi_heap_new_in_arena(0);
+}
+
+mi_heap_t* _mi_heap_new_with_page_callbacks(mi_page_acquire_fun* acquire, mi_page_release_fun* release,
+                                         void* arg) mi_attr_noexcept {
+  mi_heap_t* const heap = mi_heap_new();
+  if (heap != NULL) {
+    heap->page_acquire = acquire;
+    heap->page_release = release;
+    heap->page_callbacks_arg = arg;
+  }
+  return heap;
 }
 
 // free all theaps belonging to this heap (without deleting their pages as we do this arena wise for efficiency)
