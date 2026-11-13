@@ -218,6 +218,20 @@ static mi_arena_t* mi_arena_from_memid(mi_memid_t memid, size_t* slice_index, si
   return arena;
 }
 
+static size_t mi_page_full_size(mi_page_t* page) {
+  if (page->memid.memkind == MI_MEM_ARENA) {
+    return page->memid.mem.arena.slice_count * MI_ARENA_SLICE_SIZE;
+  }
+  else if (mi_memid_is_os(page->memid) || page->memid.memkind == MI_MEM_EXTERNAL) {
+    mi_assert_internal((uint8_t*)page->memid.mem.os.base <= (uint8_t*)page);
+    const ptrdiff_t presize = (uint8_t*)page - (uint8_t*)page->memid.mem.os.base;
+    mi_assert_internal((ptrdiff_t)page->memid.mem.os.size >= presize);
+    return (presize > (ptrdiff_t)page->memid.mem.os.size ? 0 : page->memid.mem.os.size - presize);
+  }
+  else {
+    return 0;
+  }
+}
 
 /* -----------------------------------------------------------
   Arena Allocation
@@ -1276,6 +1290,20 @@ static void mi_arenas_page_free_prim(mi_page_t* page) {
   }
   if (mi_page_meta_is_separated(page)) { page->block_size = 0; }  // for assertion checking
   _mi_arenas_free( mi_page_subproc(page), mi_page_slice_start(page), mi_page_full_size(page), page->memid);
+}
+
+bool _mi_page_callback_acquire(mi_theap_t* theap, mi_page_t* page) {
+  mi_heap_t* const heap = page->heap;
+  if (heap->page_acquire != NULL) {
+    if (!heap->page_acquire(mi_page_full_size(page), heap->page_callbacks_arg)) {
+      mi_assert_internal(theap->page_callback_rejected != NULL);
+      *theap->page_callback_rejected = true;
+      mi_page_set_theap(page, NULL);
+      return false;
+    }
+    page->page_callback_accepted = true;
+  }
+  return true;
 }
 
 static void _mi_page_callback_release(mi_page_t* page) {

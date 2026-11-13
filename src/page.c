@@ -755,17 +755,7 @@ mi_decl_nodiscard bool _mi_page_init(mi_theap_t* theap, mi_page_t* page) {
   // initialize an initial free list
   if (!mi_page_extend_free(theap,page)) return false;
   mi_assert(mi_page_immediate_available(page));
-  mi_heap_t* const heap = page->heap;
-  if (heap->page_acquire != NULL) {
-    if (!heap->page_acquire(mi_page_full_size(page), heap->page_callbacks_arg)) {
-      mi_assert_internal(theap->page_callback_rejected != NULL);
-      *theap->page_callback_rejected = true;
-      mi_page_set_theap(page, NULL);
-      return false;
-    }
-    page->page_callback_accepted = true;
-  }
-  return true;
+  return _mi_page_callback_acquire(theap, page);
 }
 
 
