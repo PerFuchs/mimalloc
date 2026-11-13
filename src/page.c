@@ -1045,21 +1045,22 @@ static mi_theap_t* mi_malloc_generic_admin(mi_theap_t* theap)
   Generic allocation
 ----------------------------------------------------------- */
 
-static mi_decl_noinline void* mi_malloc_generic_fallback(mi_theap_t* theap, size_t size, bool zero, size_t huge_alignment, mi_page_t** ppage, bool* rejected)
+static mi_decl_noinline void* mi_malloc_generic_fallback(mi_theap_t* theap, size_t size, bool zero, size_t huge_alignment, mi_page_t** ppage)
 {  
   // initialize if necessary
   theap = mi_malloc_generic_admin(theap);
   if (theap==NULL) return NULL;
   
   // find (or allocate) a page of the right size
-  mi_page_t* page = mi_find_page(theap, size, huge_alignment, rejected);
-  if (*rejected) return NULL;
+  bool rejected = false;
+  mi_page_t* page = mi_find_page(theap, size, huge_alignment, &rejected);
+  if (rejected) return NULL;
   if mi_unlikely(page == NULL) { // first time out of memory, try to collect and retry the allocation once more
     mi_theap_collect(theap, true /* force? */);
-    page = mi_find_page(theap, size, huge_alignment, rejected);
+    page = mi_find_page(theap, size, huge_alignment, &rejected);
   }
 
-  if (*rejected) return NULL;
+  if (rejected) return NULL;
   if mi_unlikely(page == NULL) { // out of memory
     const size_t req_size = size - MI_PADDING_SIZE;  // correct for padding_size in case of an overflow on `size`
     _mi_error_message(ENOMEM, "unable to allocate memory (%zu bytes)\n", req_size);
@@ -1117,5 +1118,5 @@ void* _mi_malloc_generic(mi_theap_t* theap, size_t size, size_t zero_huge_alignm
   }
   if (rejected) return NULL;
   // otherwise fallback
-  return mi_malloc_generic_fallback(theap,size,zero, huge_alignment,ppage,&rejected);
+  return mi_malloc_generic_fallback(theap,size,zero, huge_alignment,ppage);
 }

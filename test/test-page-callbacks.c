@@ -240,13 +240,25 @@ static bool thread_join(thread_t* thread) {
 
 static bool shared_heap_worker(void* arg) {
   mi_heap_t* heap = (mi_heap_t*)arg;
+  // Exercise reusable pages instead of guarded singleton allocations.
+  mi_theap_guarded_set_sample_rate(mi_heap_theap(heap), 0, 0);
   void* ptrs[300];
   bool result = true;
   for (size_t i = 0; i < 300; ++i) {
     ptrs[i] = mi_heap_malloc(heap, 37 + (i % 3) * 100);
     result &= (ptrs[i] != NULL);
   }
-  for (size_t i = 0; i < 300; ++i) mi_free(ptrs[i]);
+  // Leave one live block so thread exit abandons a reusable page.
+  for (size_t i = 1; i < 300; ++i) mi_free(ptrs[i]);
+  return result;
+}
+
+static bool reclaim_heap_worker(void* arg) {
+  mi_heap_t* heap = (mi_heap_t*)arg;
+  mi_theap_guarded_set_sample_rate(mi_heap_theap(heap), 0, 0);
+  void* ptr = mi_heap_malloc(heap, 37);
+  const bool result = (ptr != NULL);
+  mi_free(ptr);
   return result;
 }
 
@@ -260,6 +272,11 @@ static bool test_concurrent_heap(void) {
   while (started < 8 && thread_start(&threads[started], shared_heap_worker, heap)) started++;
   bool result = (started == 8);
   for (size_t i = 0; i < started; ++i) result &= thread_join(&threads[i]);
+  const uintptr_t acquired = mi_atomic_load_acquire(&state.acquire_calls);
+  thread_t reclaimer;
+  if (thread_start(&reclaimer, reclaim_heap_worker, heap)) result &= thread_join(&reclaimer);
+  else result = false;
+  result &= (mi_atomic_load_acquire(&state.acquire_calls) == acquired);
   mi_heap_destroy(heap);
   return (result && mi_atomic_load_acquire(&state.release_calls) > 0 && accounting_is_balanced(&state));
 }
