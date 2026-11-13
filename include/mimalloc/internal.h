@@ -17,10 +17,6 @@ terms of the MIT license. A copy of the license can be found in the file
 #include "track.h"
 #include "bits.h"
 
-static inline bool _mi_page_callback_rejected(const mi_theap_t* theap) {
-  return (theap->page_callback_rejected != NULL && *theap->page_callback_rejected);
-}
-
 
 // --------------------------------------------------------------------------
 // Compiler defines
@@ -263,12 +259,12 @@ void          _mi_arenas_free(mi_subproc_t* subproc, void* p, size_t size, mi_me
 void          _mi_arenas_collect(bool force_purge, bool visit_all, mi_tld_t* tld);
 void          _mi_arenas_unsafe_destroy_all(mi_subproc_t* subproc);
 
-mi_page_t*    _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t page_alignment);
+// A callback veto sets *rejected; other failures leave it unchanged.
+mi_page_t*    _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t page_alignment, bool* rejected);
 void          _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx /* can be NULL */);
 void          _mi_arenas_page_abandon(mi_page_t* page, mi_theap_t* current_theap);
 void          _mi_arenas_page_unabandon(mi_page_t* page, mi_theap_t* current_theapx /* can be NULL */);
 bool          _mi_arenas_page_try_reabandon_to_mapped(mi_page_t* page);
-bool          _mi_page_callback_acquire(mi_theap_t* theap, mi_page_t* page);
 
 // "page-map.c"
 bool          _mi_page_map_init(void);

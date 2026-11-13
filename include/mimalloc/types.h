@@ -438,7 +438,6 @@ typedef struct mi_page_s {
   uint16_t                  slice_pcommitted;  // committed size in OS page sizes relative to the first arena slice of the page data (or 0 if the page is fully committed already)
   uint8_t                   retire_expire;     // expiration count for retired blocks
   bool                      free_is_zero;      // `true` if the blocks in the free list are zero initialized
-  bool                      page_callback_accepted;
  
   // next cache line
   _Atomic(mi_thread_free_t) xthread_free;      // list of deferred free blocks freed by other threads (= `mi_block_t* | (1 if owned)`)
@@ -595,7 +594,6 @@ struct mi_theap_s {
   mi_page_queue_t       pages[MI_BIN_COUNT];                 // queue of pages for each size class (or "bin")
   mi_memid_t            memid;                               // provenance of the theap struct itself (meta or os)
   mi_stats_t            stats;                               // thread-local statistics
-  bool*                 page_callback_rejected;
 };
 
 

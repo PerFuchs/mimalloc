@@ -28,7 +28,6 @@ static const mi_page_t mi_page_empty = {
   0,                      // slice_pcommitted
   0,                      // retire_expire
   false,                  // is_zero
-  false,                  // page_callback_accepted
   MI_ATOMIC_VAR_INIT(0),  // xthread_free
   NULL,                   // theap
   NULL,                   // heap
@@ -142,7 +141,6 @@ mi_decl_hidden mi_decl_cache_align const mi_theap_t _mi_theap_empty = {
   MI_PAGE_QUEUES_EMPTY,
   MI_MEMID_STATIC,
   MI_STATS_NULL,          // stats
-  NULL,                   // page_callback_rejected
 };
 
 #undef MI_STAT_COUNT
