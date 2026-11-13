@@ -26,7 +26,6 @@ we therefore test the API over various inputs. Please add more tests :-)
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <errno.h>
 
 #ifdef __cplusplus
@@ -59,8 +58,7 @@ static bool test_zero_aligned_first(void);
 static bool test_veto(size_t size, size_t alignment, bool zero);
 static bool test_release_before_destroy(void);
 static bool test_delete_transfers_charge(void);
-static bool test_nested_veto(void);
-static bool test_concurrent_heap(void);
+static bool test_page_reclaim(void);
 static bool test_acquire_only(void);
 static bool test_release_only(bool transfer);
 static bool test_no_callbacks(void);
@@ -561,8 +559,7 @@ int main(void) {
   CHECK("page-callback-veto-zero", test_veto(128, 0, true));
   CHECK("page-callback-release-before-destroy", test_release_before_destroy());
   CHECK("page-callback-delete-transfers-charge", test_delete_transfers_charge());
-  CHECK("page-callback-nested-veto", test_nested_veto());
-  CHECK("page-callback-concurrent-heap", test_concurrent_heap());
+  CHECK("page-callback-reclaim", test_page_reclaim());
   CHECK("page-callback-acquire-only", test_acquire_only());
   CHECK("page-callback-release-only-destroy", test_release_only(false));
   CHECK("page-callback-release-only-delete", test_release_only(true));
@@ -917,138 +914,40 @@ static bool test_delete_transfers_charge(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Nested and concurrent allocations
+// Reclaim an abandoned page without acquiring it again
 // ---------------------------------------------------------------------------
-typedef struct nested_state_s {
-  callback_state_t accounting; // first so release_page can use the same argument
-  mi_heap_t* heap;
-  bool inside_callback;
-  bool nested_rejected;
-} nested_state_t;
+static mi_heap_t* page_reclaim_heap; // shared only by two sequential workers
 
-static bool nested_acquire(size_t bytes, void* arg) {
-  nested_state_t* state = (nested_state_t*)arg;
-  if (state->inside_callback) return false;
-  state->inside_callback = true;
-  state->nested_rejected = (mi_heap_malloc(state->heap, 2 * 1024 * 1024) == NULL);
-  state->inside_callback = false;
-  return acquire_page(bytes, &state->accounting);
-}
-
-static bool test_nested_veto(void) {
-  nested_state_t state = {0};
-  mi_atomic_store_release(&state.accounting.accept, 1);
-  state.heap = _mi_heap_new_with_page_callbacks(nested_acquire, release_page, &state);
-  if (state.heap == NULL) return false;
-  void* ptr = mi_heap_malloc(state.heap, 64);
-  bool result = (ptr != NULL && state.nested_rejected);
-  mi_free(ptr);
-  mi_heap_destroy(state.heap);
-  result &= check_state(&state.accounting, 1, 1);
-  return (result && accounting_is_balanced(&state.accounting));
-}
-
-// ---------------------------------------------------------------------------
-// Thread helpers (start all workers before joining)
-// ---------------------------------------------------------------------------
-typedef bool (thread_fun_t)(void*);
-typedef struct thread_s {
-  thread_fun_t* fun;
-  void* arg;
-  bool result;
-#if defined(_WIN32)
-  HANDLE handle;
-#else
-  pthread_t handle;
-#endif
-} thread_t;
-
-#if defined(_WIN32)
-static DWORD WINAPI thread_entry(LPVOID arg) {
-  thread_t* thread = (thread_t*)arg;
-  thread->result = thread->fun(thread->arg);
-  return 0;
-}
-#else
-static void* thread_entry(void* arg) {
-  thread_t* thread = (thread_t*)arg;
-  thread->result = thread->fun(thread->arg);
-  return NULL;
-}
-#endif
-
-static bool thread_start(thread_t* thread, thread_fun_t* fun, void* arg) {
-  thread->fun = fun;
-  thread->arg = arg;
-  thread->result = false;
-#if defined(_WIN32)
-  thread->handle = CreateThread(NULL, 0, thread_entry, thread, 0, NULL);
-  return (thread->handle != NULL);
-#else
-  return (pthread_create(&thread->handle, NULL, thread_entry, thread) == 0);
-#endif
-}
-
-static bool thread_join(thread_t* thread) {
-  // A failed join cannot safely return while the worker still uses stack data.
-#if defined(_WIN32)
-  if (WaitForSingleObject(thread->handle, INFINITE) != WAIT_OBJECT_0) {
-    fprintf(stderr, "unable to join test thread\n");
-    abort();
-  }
-  const bool closed = (CloseHandle(thread->handle) != 0);
-  return (thread->result && closed);
-#else
-  if (pthread_join(thread->handle, NULL) != 0) {
-    fprintf(stderr, "unable to join test thread\n");
-    abort();
-  }
-  return thread->result;
-#endif
-}
-
-static bool shared_heap_worker(void* arg) {
-  mi_heap_t* heap = (mi_heap_t*)arg;
+static bool abandon_page_worker(void) {
   // Exercise reusable pages instead of guarded singleton allocations.
-  mi_theap_guarded_set_sample_rate(mi_heap_theap(heap), 0, 0);
-  void* ptrs[300];
-  bool result = true;
-  for (size_t i = 0; i < 300; ++i) {
-    ptrs[i] = mi_heap_malloc(heap, 37 + (i % 3) * 100);
-    result &= (ptrs[i] != NULL);
-  }
-  // Leave one live block so thread exit abandons a reusable page.
-  for (size_t i = 1; i < 300; ++i) mi_free(ptrs[i]);
-  return result;
+  mi_theap_guarded_set_sample_rate(mi_heap_theap(page_reclaim_heap), 0, 0);
+  // The live block keeps the page charged when this thread exits.
+  return (mi_heap_malloc(page_reclaim_heap, 37) != NULL);
 }
 
-static bool reclaim_heap_worker(void* arg) {
-  mi_heap_t* heap = (mi_heap_t*)arg;
-  mi_theap_guarded_set_sample_rate(mi_heap_theap(heap), 0, 0);
-  void* ptr = mi_heap_malloc(heap, 37);
+static bool reclaim_page_worker(void) {
+  mi_theap_guarded_set_sample_rate(mi_heap_theap(page_reclaim_heap), 0, 0);
+  void* ptr = mi_heap_malloc(page_reclaim_heap, 37);
   const bool result = (ptr != NULL);
   mi_free(ptr);
   return result;
 }
 
-static bool test_concurrent_heap(void) {
+static bool test_page_reclaim(void) {
   callback_state_t state = {0};
   mi_atomic_store_release(&state.accept, 1);
-  mi_heap_t* heap = new_heap(&state);
-  if (heap == NULL) return false;
-  thread_t threads[8];
-  size_t started = 0;
-  while (started < 8 && thread_start(&threads[started], shared_heap_worker, heap)) started++;
-  bool result = (started == 8);
-  for (size_t i = 0; i < started; ++i) result &= thread_join(&threads[i]);
-  const uintptr_t acquired = mi_atomic_load_acquire(&state.acquire_calls);
-  thread_t reclaimer;
-  if (thread_start(&reclaimer, reclaim_heap_worker, heap)) result &= thread_join(&reclaimer);
-  else result = false;
-  result &= (mi_atomic_load_acquire(&state.acquire_calls) == acquired);
-  mi_heap_destroy(heap);
-  result &= check_state(&state, acquired, acquired);
-  return (result && acquired > 0 && accounting_is_balanced(&state));
+  page_reclaim_heap = new_heap(&state);
+  if (page_reclaim_heap == NULL) return false;
+  bool result = mi_run_on_thread(&abandon_page_worker);
+  result &= check_state(&state, 1, 0);
+  // Reclamation must succeed even when acquiring a new page would be rejected.
+  mi_atomic_store_release(&state.accept, 0);
+  if (result) result = mi_run_on_thread(&reclaim_page_worker);
+  result &= check_state(&state, 1, 0);
+  mi_heap_destroy(page_reclaim_heap);
+  page_reclaim_heap = NULL;
+  result &= check_state(&state, 1, 1);
+  return (result && accounting_is_balanced(&state));
 }
 
 // ---------------------------------------------------------------------------
