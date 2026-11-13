@@ -6,13 +6,16 @@
 extern "C" {
 #endif
 /* Callbacks are fixed at heap creation and can run concurrently on different
-   threads using that heap. `bytes` is the full owned-page span, including page
-   metadata and padding; it is not the object's requested size or resident RSS.
+   threads using that heap. Either callback may be NULL; a missing acquire
+   callback accepts every page, and a missing release callback does nothing.
+   `bytes` is the full owned-page span, including page metadata and padding;
+   it is not the object's requested size or resident RSS.
    Returning false vetoes that allocation without collection or retry after the
-   veto. Rejected acquisitions receive no release callback. Accepted pages stay
-   charged while cached, and are released once on return, destruction, or
-   transfer out of the heap. The caller owns arg and must keep callback state
-   valid until heap deletion/destruction returns, after the last release.
+   veto. Rejected acquisitions receive no release callback. Accepted pages
+   receive one release callback, if provided, on return, destruction, or transfer
+   out of the heap; cached pages are not released. The caller owns arg and must
+   keep callback state valid until heap deletion/destruction returns, after the
+   last release.
    Callbacks must not unwind through C. Heap users must be quiescent before
    deletion/destruction. */
 typedef bool mi_page_acquire_fun(size_t bytes, void* arg);

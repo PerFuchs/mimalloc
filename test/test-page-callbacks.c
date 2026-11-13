@@ -4,7 +4,6 @@
 #include <mimalloc.h>
 #include <mimalloc/atomic.h>
 #include <mimalloc/page-callbacks.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #if !defined(_WIN32)
@@ -270,11 +269,57 @@ static void check_cached_heap_address_reuse(void) {
   for (size_t i = 0; i < count; ++i) mi_heap_destroy(heaps[i]);
 }
 
-static void check_callback_pair(void) {
+static void check_acquire_only(void) {
   callback_state_t state = {0};
-  errno = 0;
-  CHECK(_mi_heap_new_with_page_callbacks(acquire_page, NULL, &state) == NULL);
-  CHECK(errno == EINVAL);
+  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(acquire_page, NULL, &state);
+  CHECK(heap != NULL);
+  CHECK(mi_heap_malloc(heap, 8 * 1024 * 1024) == NULL);
+  CHECK(mi_atomic_load_acquire(&state.acquire_calls) == 1);
+  CHECK(mi_atomic_load_acquire(&state.acquired_bytes) == 0);
+  mi_atomic_store_release(&state.accept, 1);
+  void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
+  CHECK(ptr != NULL);
+  CHECK(mi_atomic_load_acquire(&state.acquire_calls) == 2);
+  CHECK(mi_atomic_load_acquire(&state.acquired_bytes) > 0);
+  mi_free(ptr);
+  mi_heap_collect(heap, true);
+  mi_heap_destroy(heap);
+  CHECK(mi_atomic_load_acquire(&state.release_calls) == 0);
+}
+
+static void observe_release(size_t bytes, void* arg) {
+  callback_state_t* state = (callback_state_t*)arg;
+  CHECK(bytes > 0);
+  mi_atomic_add_relaxed(&state->released_bytes, bytes);
+  mi_atomic_increment_relaxed(&state->release_calls);
+}
+
+static void check_release_only(bool transfer) {
+  callback_state_t state = {0};
+  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(NULL, observe_release, &state);
+  CHECK(heap != NULL);
+  void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
+  CHECK(ptr != NULL);
+  CHECK(mi_atomic_load_acquire(&state.release_calls) == 0);
+  if (transfer) mi_heap_delete(heap);
+  else mi_heap_destroy(heap);
+  CHECK(mi_atomic_load_acquire(&state.acquire_calls) == 0);
+  CHECK(mi_atomic_load_acquire(&state.release_calls) == 1);
+  const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
+  CHECK(released > 0);
+  if (transfer) {
+    mi_free(ptr);
+    mi_collect(true);
+    CHECK(mi_atomic_load_acquire(&state.release_calls) == 1);
+    CHECK(mi_atomic_load_acquire(&state.released_bytes) == released);
+  }
+}
+
+static void check_no_callbacks(void) {
+  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(NULL, NULL, NULL);
+  CHECK(heap != NULL);
+  CHECK(mi_heap_malloc(heap, 64) != NULL);
+  mi_heap_destroy(heap);
 }
 
 int main(void) {
@@ -287,7 +332,10 @@ int main(void) {
   check_nested_veto();
   check_concurrent_heap();
   check_cached_heap_address_reuse();
-  check_callback_pair();
+  check_acquire_only();
+  check_release_only(false);
+  check_release_only(true);
+  check_no_callbacks();
   puts("page callback tests passed");
   return 0;
 }

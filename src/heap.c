@@ -164,10 +164,6 @@ mi_heap_t* mi_heap_new(void) {
 
 mi_heap_t* _mi_heap_new_with_page_callbacks(mi_page_acquire_fun* acquire, mi_page_release_fun* release,
                                          void* arg) mi_attr_noexcept {
-  if ((acquire == NULL) != (release == NULL)) {
-    errno = EINVAL;
-    return NULL;
-  }
   mi_heap_t* const heap = mi_heap_new();
   if (heap != NULL) {
     heap->page_acquire = acquire;

@@ -1301,8 +1301,8 @@ bool _mi_page_callback_acquire(mi_theap_t* theap, mi_page_t* page) {
       mi_page_set_theap(page, NULL);
       return false;
     }
-    page->page_callback_accepted = true;
   }
+  page->page_callback_accepted = (heap->page_release != NULL);
   return true;
 }
 
