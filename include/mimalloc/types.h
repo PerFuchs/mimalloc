@@ -624,7 +624,7 @@ typedef struct mi_heap_s {
   mi_arena_t*           exclusive_arena;                // if the heap should only allocate from a specific arena (or NULL)
   int                   numa_node;                      // if >=0, prefer this numa node for allocations
 
-  mi_page_acquire_fun*  page_acquire;                   // optional page acquisition callback; false vetoes the allocation
+  mi_page_acquire_fun*  page_acquire;                   // optional page acquisition callback; if it returns false, this vetoes the allocation
   mi_page_release_fun*  page_release;                   // optional callback on page return, destruction, or transfer
   void*                 page_callbacks_arg;             // user argument for the page callbacks
 

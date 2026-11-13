@@ -1136,7 +1136,21 @@ static mi_page_t* mi_arenas_page_alloc_fresh(mi_theap_t* theap, size_t slice_cou
   return page;
 }
 
-static void mi_arenas_page_discard(mi_page_t* page, mi_theap_t* current_theapx);
+// Free page storage and statistics without issuing a release callback.
+static void mi_arenas_page_discard(mi_page_t* page, mi_theap_t* current_theapx) {
+  mi_assert_internal(_mi_is_aligned(mi_page_slice_start(page), MI_PAGE_ALIGN));
+  mi_assert_internal(_mi_ptr_page(mi_page_start(page))==page);
+  mi_assert_internal(mi_page_is_owned(page));
+  mi_assert_internal(mi_page_all_free(page));
+  mi_assert_internal(mi_page_is_abandoned(page));
+  mi_assert_internal(page->next==NULL && page->prev==NULL);
+  mi_assert_internal(mi_theap_matches_thread(current_theapx));
+
+  mi_heap_t* const heap = mi_page_heap(page);
+  mi_theapx_stat_decrease(heap, current_theapx, page_bins[_mi_page_stats_bin(page)], 1);
+  mi_theapx_stat_decrease(heap, current_theapx, pages, 1);
+  mi_arenas_page_free_prim(page);
+}
 
 // Allocate a regular small/medium/large page.
 static mi_page_t* mi_arenas_page_regular_alloc(mi_theap_t* theap, size_t slice_count, size_t block_size)
@@ -1308,22 +1322,6 @@ static void mi_page_callback_release(mi_page_t* page) {
   if (heap->page_release != NULL) {
     heap->page_release(mi_page_full_size(page), heap->page_callbacks_arg);
   }
-}
-
-// Free page storage and statistics without issuing a release callback.
-static void mi_arenas_page_discard(mi_page_t* page, mi_theap_t* current_theapx) {
-  mi_assert_internal(_mi_is_aligned(mi_page_slice_start(page), MI_PAGE_ALIGN));
-  mi_assert_internal(_mi_ptr_page(mi_page_start(page))==page);
-  mi_assert_internal(mi_page_is_owned(page));
-  mi_assert_internal(mi_page_all_free(page));
-  mi_assert_internal(mi_page_is_abandoned(page));
-  mi_assert_internal(page->next==NULL && page->prev==NULL);
-  mi_assert_internal(mi_theap_matches_thread(current_theapx));
-
-  mi_heap_t* const heap = mi_page_heap(page);
-  mi_theapx_stat_decrease(heap, current_theapx, page_bins[_mi_page_stats_bin(page)], 1);
-  mi_theapx_stat_decrease(heap, current_theapx, pages, 1);
-  mi_arenas_page_free_prim(page);
 }
 
 void _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx) {
