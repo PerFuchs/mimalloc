@@ -168,6 +168,11 @@ mi_heap_t* mi_heap_new(void) {
 }
 
 mi_heap_t* mi_heap_new_with_page_callbacks(mi_page_acquire_fun_t* acquire, mi_page_release_fun_t* release, void* arg) {
+  if ((acquire != NULL || release != NULL) && mi_option_is_enabled(mi_option_disallow_arena_alloc)) {
+    // all small pages would come from the OS, but a heap with page callbacks only takes those from arenas
+    _mi_warning_message("cannot create a heap with page callbacks while arena allocation is disallowed\n");
+    return NULL;
+  }
   mi_thread_init();  // see `mi_heap_new_in_arena`
   return mi_heap_new_for_subproc_ex(_mi_subproc(), 0, false, acquire, release, arg);
 }

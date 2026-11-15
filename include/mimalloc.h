@@ -355,9 +355,11 @@ mi_decl_nodiscard mi_decl_export mi_heap_t* mi_heap_new_in_arena(mi_arena_id_t a
 // right after) with the full page size including metadata; returning false makes the allocation
 // return NULL with errno set to ENOMEM. Each accepted page gets one `release` call with the same size
 // when it is freed or moved to the main heap (abandoned pages stay charged), so the sizes balance once
-// the heap is deleted or destroyed. If an accepted arena page falls back to the OS, it is released and
-// the OS page is offered again. Either callback may be NULL. Callbacks can run concurrently on any
-// thread, also during thread and process exit, and must not throw; `arg` must stay valid while they can run.
+// the heap is deleted or destroyed. Pages that fit in an arena are only taken from arenas: if no arena
+// memory is available the allocation fails with ENOMEM instead of using the OS, and the heap cannot be
+// created (NULL) while `mi_option_disallow_arena_alloc` is enabled. Either callback may be NULL. Callbacks
+// can run concurrently on any thread, also during thread and process exit, and must not throw; `arg`
+// must stay valid while they can run.
 typedef bool (mi_cdecl mi_page_acquire_fun_t)(size_t bytes, void* arg);
 typedef void (mi_cdecl mi_page_release_fun_t)(size_t bytes, void* arg);
 mi_decl_nodiscard mi_decl_export mi_heap_t* mi_heap_new_with_page_callbacks(mi_page_acquire_fun_t* acquire, mi_page_release_fun_t* release, void* arg);

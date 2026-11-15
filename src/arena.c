@@ -785,7 +785,17 @@ static bool mi_arenas_page_can_alloc_in_arena(size_t slice_count, bool os_align)
           slice_count <= mi_arena_max_object_size()/MI_ARENA_SLICE_SIZE); // and not too large
 }
 
-static uint8_t* mi_arenas_page_alloc_fresh_area(mi_theap_t* theap, size_t slice_count, size_t max_page_meta_count, size_t block_alignment, bool os_align, bool commit, mi_memid_t* memid, mi_arena_pages_t** parena_pages ) {
+// Can a fresh page of a heap with page callbacks be allocated directly from the OS?
+// Only pages that cannot come from an arena and hold a single block can. Such a page is full
+// right away and gets abandoned, so `mi_heap_delete`/`mi_heap_destroy` always find it and call
+// `release`. A multi-block OS page can stay in a thread's page queue where they would miss it;
+// and an arena page that falls back to the OS would be offered to `acquire` a second time.
+static bool mi_arenas_page_can_alloc_in_os(mi_heap_t* heap, size_t slice_count, bool os_align, bool singleton) {
+  if (heap->page_acquire_fun == NULL && heap->page_release_fun == NULL) return true;
+  return (singleton && !mi_arenas_page_can_alloc_in_arena(slice_count, os_align));
+}
+
+static uint8_t* mi_arenas_page_alloc_fresh_area(mi_theap_t* theap, size_t slice_count, size_t max_page_meta_count, size_t block_alignment, bool os_align, bool singleton, bool commit, mi_memid_t* memid, mi_arena_pages_t** parena_pages ) {
   MI_UNUSED(max_page_meta_count);
   mi_assert_internal(parena_pages!=NULL);
 
@@ -821,6 +831,10 @@ static uint8_t* mi_arenas_page_alloc_fresh_area(mi_theap_t* theap, size_t slice_
   }
 
   // otherwise fall back to the OS
+  if (start == NULL && !mi_arenas_page_can_alloc_in_os(heap, slice_count, os_align, singleton)) {
+    errno = ENOMEM;
+    return NULL;
+  }
   if (start == NULL) {
     #if MI_PAGE_META_IS_ALIGNED
     size_t page_offset;      // offset in the block for the page area
@@ -961,7 +975,7 @@ static mi_page_t* mi_arenas_page_alloc_fresh(mi_theap_t* theap, size_t slice_cou
   const size_t alloc_size       = mi_size_of_slices(slice_count);
   mi_memid_t memid              = _mi_memid_none();
   mi_arena_pages_t* arena_pages = NULL;
-  uint8_t* const slice_start    = mi_arenas_page_alloc_fresh_area(theap,slice_count,max_page_meta_count,block_alignment,os_align,commit,&memid,&arena_pages);
+  uint8_t* const slice_start    = mi_arenas_page_alloc_fresh_area(theap,slice_count,max_page_meta_count,block_alignment,os_align,singleton,commit,&memid,&arena_pages);
   if (!slice_start) return NULL;
 
   // guard page at the end of mimalloc page?
@@ -1172,13 +1186,14 @@ static void mi_arenas_page_unacquire(mi_heap_t* heap, size_t bytes) {
 }
 
 // Allocate and initialize a fresh page. Pages that can come from an arena are charged before
-// allocation, so a veto takes no arena memory. If the page falls back to the OS the charge is
-// undone, and `_mi_arenas_page_alloc` charges the OS page once its full size is known.
+// allocation, so a veto takes no arena memory; heaps with page callbacks never get such pages
+// from the OS (see `mi_arenas_page_can_alloc_in_os`). Other pages come from the OS and
+// `_mi_arenas_page_alloc` charges them once their full size is known.
 static mi_page_t* mi_arenas_page_alloc_fresh_init(mi_theap_t* theap, size_t slice_count, size_t block_size, size_t block_alignment, bool commit, bool* rejected)
 {
   mi_heap_t* const heap = _mi_theap_heap(theap);
   const bool os_align = (block_alignment > MI_PAGE_MAX_OVERALLOC_ALIGN);
-  const size_t charge = (mi_arenas_page_can_alloc_in_arena(slice_count, os_align) ? mi_size_of_slices(slice_count) : 0);
+  const size_t charge = (heap->page_acquire_fun != NULL && mi_arenas_page_can_alloc_in_arena(slice_count, os_align) ? mi_size_of_slices(slice_count) : 0);
   if (charge > 0 && !mi_arenas_page_acquire(heap, charge, rejected)) return NULL;
 
   mi_page_t* page = mi_arenas_page_alloc_fresh(theap, slice_count, block_size, block_alignment, commit);
@@ -1186,10 +1201,10 @@ static mi_page_t* mi_arenas_page_alloc_fresh_init(mi_theap_t* theap, size_t slic
     mi_arenas_page_discard(page,theap);
     page = NULL;
   }
-  if (charge > 0 && (page == NULL || page->memid.memkind != MI_MEM_ARENA)) {
+  if (charge > 0 && page == NULL) {
     mi_arenas_page_unacquire(heap, charge);
   }
-  mi_assert_internal(page == NULL || page->memid.memkind != MI_MEM_ARENA || mi_page_full_size(page) == charge);
+  mi_assert_internal(page == NULL || charge == 0 || (page->memid.memkind == MI_MEM_ARENA && mi_page_full_size(page) == charge));
   return page;
 }
 

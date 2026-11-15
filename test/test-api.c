@@ -56,7 +56,9 @@ bool test_stl_theap_allocator4(void);
 
 static bool test_zero_aligned_first(void);
 static bool test_veto(size_t size, size_t alignment, bool zero);
-static bool test_veto_os(size_t size);
+static bool test_veto_os(void);
+static bool test_disallow_arena_alloc(void);
+static bool test_no_os_fallback(void);
 static bool test_release_before_destroy(void);
 static bool test_delete_transfers_charge(void);
 static bool test_page_reclaim(void);
@@ -558,8 +560,9 @@ int main(void) {
   CHECK("page-callback-veto-8MiB", test_veto(8 * 1024 * 1024, 0, false));
   CHECK("page-callback-veto-aligned", test_veto(97, 1024 * 1024, false));
   CHECK("page-callback-veto-zero", test_veto(128, 0, true));
-  CHECK("page-callback-veto-os-small", test_veto_os(37));
-  CHECK("page-callback-veto-os-8MiB", test_veto_os(8 * 1024 * 1024));
+  CHECK("page-callback-veto-os", test_veto_os());
+  CHECK("page-callback-disallow-arena-alloc", test_disallow_arena_alloc());
+  CHECK("page-callback-no-os-fallback", test_no_os_fallback());
   CHECK("page-callback-release-before-destroy", test_release_before_destroy());
   CHECK("page-callback-delete-transfers-charge", test_delete_transfers_charge());
   CHECK("page-callback-reclaim", test_page_reclaim());
@@ -878,13 +881,46 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   return (result && accounting_is_balanced(&state));
 }
 
-// Pages allocated directly from the OS are offered only after allocation.
-static bool test_veto_os(size_t size) {
+// Objects too large for an arena get a page directly from the OS, offered only after allocation.
+static bool test_veto_os(void) {
+  return test_veto(mi_arena_max_object_size() + 1024 * 1024, 0, false);
+}
+
+static bool test_disallow_arena_alloc(void) {
+  callback_state_t state = {0};
   const long disallow_arena_alloc = mi_option_get(mi_option_disallow_arena_alloc);
   mi_option_enable(mi_option_disallow_arena_alloc);
-  const bool result = test_veto(size, 0, false);
+  mi_heap_t* heap = new_heap(&state);
   mi_option_set(mi_option_disallow_arena_alloc, disallow_arena_alloc);
-  return result;
+  if (heap != NULL) {
+    mi_heap_destroy(heap);
+    return false;
+  }
+  return check_state(&state, 0, 0);
+}
+
+// A page with several blocks never comes from the OS, even when arenas cannot be used.
+static bool test_no_os_fallback(void) {
+  callback_state_t state = {0};
+  mi_atomic_store_release(&state.accept, 1);
+  mi_heap_t* heap = new_heap(&state);
+  if (heap == NULL) return false;
+  const long disallow_arena_alloc = mi_option_get(mi_option_disallow_arena_alloc);
+  mi_option_enable(mi_option_disallow_arena_alloc);
+  mi_register_error(error_handler, &state);
+  errno = 0;
+  void* small = mi_heap_malloc(heap, 37);
+  bool result = (small == NULL && errno == ENOMEM);
+  mi_register_error(NULL, NULL);
+  mi_option_set(mi_option_disallow_arena_alloc, disallow_arena_alloc);
+  mi_free(small);
+  mi_atomic_store_release(&state.errors, 0);  // the failed allocations report out of memory
+  result &= check_state(&state, 0, 0);
+  small = mi_heap_malloc(heap, 37);
+  result &= (small != NULL);
+  mi_heap_destroy(heap);
+  result &= check_state(&state, 1, 1);
+  return (result && accounting_is_balanced(&state));
 }
 
 static bool test_release_before_destroy(void) {
