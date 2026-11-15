@@ -56,6 +56,7 @@ bool test_stl_theap_allocator4(void);
 
 static bool test_zero_aligned_first(void);
 static bool test_veto(size_t size, size_t alignment, bool zero);
+static bool test_veto_os(size_t size);
 static bool test_release_before_destroy(void);
 static bool test_delete_transfers_charge(void);
 static bool test_page_reclaim(void);
@@ -557,6 +558,8 @@ int main(void) {
   CHECK("page-callback-veto-8MiB", test_veto(8 * 1024 * 1024, 0, false));
   CHECK("page-callback-veto-aligned", test_veto(97, 1024 * 1024, false));
   CHECK("page-callback-veto-zero", test_veto(128, 0, true));
+  CHECK("page-callback-veto-os-small", test_veto_os(37));
+  CHECK("page-callback-veto-os-8MiB", test_veto_os(8 * 1024 * 1024));
   CHECK("page-callback-release-before-destroy", test_release_before_destroy());
   CHECK("page-callback-delete-transfers-charge", test_delete_transfers_charge());
   CHECK("page-callback-reclaim", test_page_reclaim());
@@ -847,10 +850,11 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   if (heap == NULL) return false;
   mi_register_deferred_free(deferred_free, &state);
   mi_register_error(error_handler, &state);
+  errno = 0;
   void* ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
                               : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
   bool result = check_state(&state, 1, 0);
-  result &= (ptr == NULL);
+  result &= (ptr == NULL && errno == ENOMEM);
   mi_register_deferred_free(NULL, NULL);
   mi_register_error(NULL, NULL);
   mi_free(ptr);
@@ -872,6 +876,15 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   mi_heap_destroy(heap);
   result &= check_state(&state, 2, 1);
   return (result && accounting_is_balanced(&state));
+}
+
+// Pages allocated directly from the OS are offered only after allocation.
+static bool test_veto_os(size_t size) {
+  const long disallow_arena_alloc = mi_option_get(mi_option_disallow_arena_alloc);
+  mi_option_enable(mi_option_disallow_arena_alloc);
+  const bool result = test_veto(size, 0, false);
+  mi_option_set(mi_option_disallow_arena_alloc, disallow_arena_alloc);
+  return result;
 }
 
 static bool test_release_before_destroy(void) {
