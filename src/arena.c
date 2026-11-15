@@ -1158,7 +1158,7 @@ static void mi_arenas_page_discard(mi_page_t* page, mi_theap_t* current_theapx) 
 
 // Ask the heap to accept a new page of `bytes`; a veto sets `*rejected` and `errno`.
 static bool mi_arenas_page_acquire(mi_heap_t* heap, size_t bytes, bool* rejected) {
-  if (heap->page_acquire == NULL || heap->page_acquire(bytes, heap->page_callbacks_arg)) return true;
+  if (heap->page_acquire_fun == NULL || heap->page_acquire_fun(bytes, heap->page_fun_arg)) return true;
   *rejected = true;
   errno = ENOMEM;
   return false;
@@ -1166,8 +1166,8 @@ static bool mi_arenas_page_acquire(mi_heap_t* heap, size_t bytes, bool* rejected
 
 // Undo an accepted acquisition for a page that was not added to the heap after all.
 static void mi_arenas_page_unacquire(mi_heap_t* heap, size_t bytes) {
-  if (heap->page_acquire != NULL && heap->page_release != NULL) {
-    heap->page_release(bytes, heap->page_callbacks_arg);
+  if (heap->page_acquire_fun != NULL && heap->page_release_fun != NULL) {
+    heap->page_release_fun(bytes, heap->page_fun_arg);
   }
 }
 
@@ -1342,15 +1342,15 @@ static void mi_arenas_page_free_prim(mi_page_t* page) {
   _mi_arenas_free( mi_page_subproc(page), mi_page_slice_start(page), mi_page_full_size(page), page->memid);
 }
 
-static void mi_page_callback_release(mi_page_t* page) {
+static void mi_arenas_page_release(mi_page_t* page) {
   mi_heap_t* const heap = page->heap;
-  if (heap->page_release != NULL) {
-    heap->page_release(mi_page_full_size(page), heap->page_callbacks_arg);
+  if (heap->page_release_fun != NULL) {
+    heap->page_release_fun(mi_page_full_size(page), heap->page_fun_arg);
   }
 }
 
 void _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx) {
-  mi_page_callback_release(page);
+  mi_arenas_page_release(page);
   mi_arenas_page_discard(page, current_theapx);
 }
 
@@ -2614,7 +2614,7 @@ static bool mi_heap_delete_page(const mi_heap_t* heap, const mi_heap_area_t* are
     _mi_arenas_page_free(page, theap);
   }
   else {
-    mi_page_callback_release(page);
+    mi_arenas_page_release(page);
     // move the page to `heap_target` as an abandoned page
     // first remove it from the current heap
     const size_t sbin = _mi_page_stats_bin(page);

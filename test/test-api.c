@@ -823,7 +823,7 @@ static bool accounting_is_balanced(callback_state_t* state) {
 }
 
 static mi_heap_t* new_heap(callback_state_t* state) {
-  return _mi_heap_new_with_page_callbacks(acquire_page, release_page, state);
+  return mi_heap_new_with_page_callbacks(acquire_page, release_page, state);
 }
 
 static void deferred_free(bool force, unsigned long long heartbeat, void* arg) {
@@ -968,7 +968,7 @@ static bool test_page_reclaim(void) {
 // ---------------------------------------------------------------------------
 static bool test_acquire_only(void) {
   callback_state_t state = {0};
-  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(acquire_page, NULL, &state);
+  mi_heap_t* heap = mi_heap_new_with_page_callbacks(acquire_page, NULL, &state);
   if (heap == NULL) return false;
   void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
   bool result = check_state(&state, 1, 0);
@@ -986,7 +986,7 @@ static bool test_acquire_only(void) {
 
 static bool test_release_only(bool transfer) {
   callback_state_t state = {0};
-  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(NULL, observe_release, &state);
+  mi_heap_t* heap = mi_heap_new_with_page_callbacks(NULL, observe_release, &state);
   if (heap == NULL) return false;
   void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
   if (ptr == NULL) {
@@ -1009,7 +1009,7 @@ static bool test_release_only(bool transfer) {
 }
 
 static bool test_no_callbacks(void) {
-  mi_heap_t* heap = _mi_heap_new_with_page_callbacks(NULL, NULL, NULL);
+  mi_heap_t* heap = mi_heap_new_with_page_callbacks(NULL, NULL, NULL);
   if (heap == NULL) return false;
   bool result = (mi_heap_malloc(heap, 64) != NULL);
   mi_heap_destroy(heap);

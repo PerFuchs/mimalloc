@@ -194,7 +194,7 @@ static void mi_heap_main_init_once(void) {
   // main process heap
   mi_process_heap_main.memid = memid_static;
   mi_atomic_store_ptr_release(mi_heap_t,&subproc_main->heap_main,&mi_process_heap_main);
-  _mi_heap_init(&mi_process_heap_main,mi_thread_local_key_fast,subproc_main,0);
+  _mi_heap_init(&mi_process_heap_main,mi_thread_local_key_fast,subproc_main,0,NULL,NULL,NULL);
 
   // detached theap for allocating meta-data (we can allocate on this without having an initialized thread)
   mi_process_theap_meta.memid = memid_static;
