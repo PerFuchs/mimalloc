@@ -795,6 +795,46 @@ static mi_page_t* mi_arenas_page_alloc_fresh(mi_theap_t* theap, size_t slice_cou
   return page;
 }
 
+// Ask the heap to accept a new page of `bytes`; a veto sets `*rejected` and `errno`.
+static bool mi_arenas_page_acquire(mi_heap_t* heap, size_t bytes, bool* rejected) {
+  if (heap->page_acquire == NULL || heap->page_acquire(bytes, heap->page_callbacks_arg)) return true;
+  *rejected = true;
+  errno = ENOMEM;
+  return false;
+}
+
+// Undo an accepted acquisition for a page that was not added to the heap after all.
+static void mi_arenas_page_unacquire(mi_heap_t* heap, size_t bytes) {
+  if (heap->page_acquire != NULL && heap->page_release != NULL) {
+    heap->page_release(bytes, heap->page_callbacks_arg);
+  }
+}
+
+// Allocate a fresh page and charge it to the heap. The page is charged its slices before allocation,
+// so a veto takes no memory. A page that comes from the OS can be larger (its mapping is rounded up),
+// so the remainder up to its full size is charged after allocation. The charges add up to
+// `mi_page_full_size`, which `_mi_arenas_page_free` releases.
+static mi_page_t* mi_arenas_page_alloc_fresh_charged(mi_theap_t* theap, size_t slice_count, size_t block_size, size_t block_alignment, bool commit, mi_page_guards_t guards, bool* rejected)
+{
+  mi_heap_t* const heap = mi_theap_heap(theap);
+  const size_t charge = _mi_size_of_slices(slice_count);
+  if (!mi_arenas_page_acquire(heap, charge, rejected)) return NULL;
+
+  mi_page_t* const page = mi_arenas_page_alloc_fresh(theap, slice_count, block_size, block_alignment, commit, guards);
+  if (page == NULL) {
+    mi_arenas_page_unacquire(heap, charge);
+    return NULL;
+  }
+  const size_t full_size = mi_page_full_size(page);
+  mi_assert_internal(full_size >= charge);
+  if (full_size > charge && !mi_arenas_page_acquire(heap, full_size - charge, rejected)) {
+    mi_arenas_page_unacquire(heap, charge);
+    mi_page_set_theap(page, NULL);
+    mi_arenas_page_discard(page, theap);
+    return NULL;
+  }
+  return page;
+}
 
 
 /* -----------------------------------------------------------
@@ -802,7 +842,7 @@ static mi_page_t* mi_arenas_page_alloc_fresh(mi_theap_t* theap, size_t slice_cou
 ----------------------------------------------------------- */
 
 // Allocate a regular small/medium/large page.
-static mi_page_t* mi_arenas_page_regular_alloc(mi_theap_t* theap, size_t slice_count, size_t block_size)
+static mi_page_t* mi_arenas_page_regular_alloc(mi_theap_t* theap, size_t slice_count, size_t block_size, bool* rejected)
 {
   // 1. look for an abandoned page
   const mi_page_guards_t guards = mi_theap_page_guards(theap, _mi_size_of_slices(slice_count), false);
@@ -816,12 +856,12 @@ static mi_page_t* mi_arenas_page_regular_alloc(mi_theap_t* theap, size_t slice_c
   const bool commit = (mi_page_min_commit_size() >= slice_count * MI_ARENA_SLICE_SIZE ||           // always commit small pages
                        (slice_count >= _mi_slice_count_of_size(UINT16_MAX * _mi_os_page_size())) ||   // always commit pages too large to hold a 32-bit slice_committed
                         (commit_on_demand == 2 && _mi_os_has_overcommit()) || (commit_on_demand == 0));
-  page = mi_arenas_page_alloc_fresh(theap, slice_count, block_size, 1, commit, guards);
+  page = mi_arenas_page_alloc_fresh_charged(theap, slice_count, block_size, 1, commit, guards, rejected);
   if (page == NULL) return NULL;
 
   mi_assert_internal(page->memid.memkind != MI_MEM_ARENA || page->memid.mem.arena.slice_count == slice_count);
   if (!_mi_page_init(theap, page)) {
-    mi_arenas_page_discard(page,theap);
+    _mi_arenas_page_free(page,theap);
     return NULL;
   }
 
@@ -829,7 +869,7 @@ static mi_page_t* mi_arenas_page_regular_alloc(mi_theap_t* theap, size_t slice_c
 }
 
 // Allocate a page containing one block (very large, or with large alignment)
-static mi_page_t* mi_arenas_page_singleton_alloc(mi_theap_t* theap, size_t block_size, size_t block_alignment)
+static mi_page_t* mi_arenas_page_singleton_alloc(mi_theap_t* theap, size_t block_size, size_t block_alignment, bool* rejected)
 {
   const bool os_align = (block_alignment > MI_PAGE_MAX_OVERALLOC_ALIGN);
   #if MI_PAGE_META_OS_IS_SEPARATED
@@ -844,12 +884,12 @@ static mi_page_t* mi_arenas_page_singleton_alloc(mi_theap_t* theap, size_t block
   const mi_page_guards_t guards = mi_theap_page_guards(theap, _mi_size_of_slices(_mi_slice_count_of_size(size)), os_align);
   const size_t slice_count = _mi_slice_count_of_size(mi_page_guard_front_block_start(guards.front, block_size) + size + guards.end);
 
-  mi_page_t* page = mi_arenas_page_alloc_fresh(theap, slice_count, block_size, block_alignment, true /* commit singletons always */, guards);
+  mi_page_t* page = mi_arenas_page_alloc_fresh_charged(theap, slice_count, block_size, block_alignment, true /* commit singletons always */, guards, rejected);
   if (page == NULL) return NULL;
 
   mi_assert(page->reserved == 1);
   if (!_mi_page_init(theap, page)) {
-    mi_arenas_page_discard(page,theap);
+    _mi_arenas_page_free(page,theap);
     return NULL;
   }
 
@@ -863,21 +903,21 @@ mi_page_t* _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t bl
   mi_assert(_mi_bin(MI_LARGE_MAX_OBJ_SIZE)  < MI_ARENA_BIN_COUNT);
   if mi_unlikely(block_alignment > MI_PAGE_MAX_OVERALLOC_ALIGN) {
     mi_assert_internal(mi_is_power_of_two(block_alignment));
-    page = mi_arenas_page_singleton_alloc(theap, block_size, block_alignment);
+    page = mi_arenas_page_singleton_alloc(theap, block_size, block_alignment, rejected);
   }
   else if (block_size <= MI_SMALL_MAX_OBJ_SIZE) {
-    page = mi_arenas_page_regular_alloc(theap, _mi_slice_count_of_size(MI_SMALL_PAGE_SIZE), block_size);
+    page = mi_arenas_page_regular_alloc(theap, _mi_slice_count_of_size(MI_SMALL_PAGE_SIZE), block_size, rejected);
   }
   else if (mi_block_size_is_medium(block_size)) {
-    page = mi_arenas_page_regular_alloc(theap, _mi_slice_count_of_size(MI_MEDIUM_PAGE_SIZE), block_size);
+    page = mi_arenas_page_regular_alloc(theap, _mi_slice_count_of_size(MI_MEDIUM_PAGE_SIZE), block_size, rejected);
   }
   #if MI_ENABLE_LARGE_PAGES
   else if (block_size <= MI_LARGE_MAX_OBJ_SIZE) {
-    page = mi_arenas_page_regular_alloc(theap, _mi_slice_count_of_size(MI_LARGE_PAGE_SIZE), block_size);
+    page = mi_arenas_page_regular_alloc(theap, _mi_slice_count_of_size(MI_LARGE_PAGE_SIZE), block_size, rejected);
   }
   #endif
   else {
-    page = mi_arenas_page_singleton_alloc(theap, block_size, block_alignment);
+    page = mi_arenas_page_singleton_alloc(theap, block_size, block_alignment, rejected);
   }
   if mi_unlikely(page == NULL) {
     return NULL;
@@ -887,15 +927,6 @@ mi_page_t* _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t bl
   mi_assert_internal(mi_ptr_page(mi_page_start(page))==page);
   mi_assert_internal(block_alignment <= MI_PAGE_MAX_OVERALLOC_ALIGN || mi_is_aligned(mi_page_start(page), block_alignment));
 
-  // a reclaimed abandoned page already belongs to this heap and stays charged
-  mi_heap_t* const heap = mi_page_heap(page);
-  if (!mi_page_is_abandoned(page) && heap->page_acquire != NULL &&
-      !heap->page_acquire(mi_page_full_size(page), heap->page_callbacks_arg)) {
-    *rejected = true;
-    mi_page_set_theap(page, NULL);
-    mi_arenas_page_discard(page, theap);
-    return NULL;
-  }
   return page;
 }
 

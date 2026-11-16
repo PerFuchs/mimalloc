@@ -251,8 +251,12 @@ mi_decl_nodiscard mi_decl_export mi_heap_t* mi_heap_new(void);
 // subtracting released bytes. The matching-call and zero-balance guarantees below
 // apply to that pair of callbacks.
 // Called before a new page is added to the heap. `bytes` is the full page span, including
-// metadata and padding.
-// Returning `false` makes the allocation return NULL. The callback is called at most once per allocation. Returning `true` means there will be a matching `mi_page_release_fun` call for this page.
+// metadata and padding. A page is offered before its memory is allocated. A page allocated
+// directly from the OS can be larger, because its mapping is rounded up; after allocation,
+// acquire is called again with only the extra bytes.
+// Returning `false` makes the allocation return NULL with `errno` set to ENOMEM.
+// Returning `true` means there will be a matching `mi_page_release_fun` call, which reports
+// the sum of the bytes accepted for the page.
 typedef bool (mi_cdecl mi_page_acquire_fun)(size_t bytes, void* arg);
 
 // Called once when a page is returned, destroyed, or transferred out of the heap.

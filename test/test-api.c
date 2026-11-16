@@ -57,6 +57,7 @@ bool test_stl_theap_allocator4(void);
 
 static bool test_zero_aligned_first(void);
 static bool test_veto(size_t size, size_t alignment, bool zero);
+static bool test_veto_os(void);
 static bool test_release_before_destroy(void);
 static bool test_delete_transfers_charge(void);
 static bool test_page_reclaim(void);
@@ -737,6 +738,7 @@ int main(void) {
   CHECK("page-callback-veto-8MiB", test_veto(8 * 1024 * 1024, 0, false));
   CHECK("page-callback-veto-aligned", test_veto(97, 1024 * 1024, false));
   CHECK("page-callback-veto-zero", test_veto(128, 0, true));
+  CHECK("page-callback-veto-os", test_veto_os());
   CHECK("page-callback-release-before-destroy", test_release_before_destroy());
   CHECK("page-callback-delete-transfers-charge", test_delete_transfers_charge());
   CHECK("page-callback-reclaim", test_page_reclaim());
@@ -1229,10 +1231,11 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   if (heap == NULL) return false;
   mi_register_deferred_free(deferred_free, &state);
   mi_register_error(error_handler, &state);
+  errno = 0;
   void* ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
                               : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
   bool result = check_state(&state, 1, 0);
-  result &= (ptr == NULL);
+  result &= (ptr == NULL && errno == ENOMEM);
   mi_register_deferred_free(NULL, NULL);
   mi_register_error(NULL, NULL);
   mi_free(ptr);
@@ -1244,7 +1247,10 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
     mi_heap_destroy(heap);
     return false;
   }
-  result &= check_state(&state, 2, 0);
+  // an OS page that is larger than its slices gets a second acquire call for the extra bytes
+  const uintptr_t acquire_calls = mi_atomic_load_acquire(&state.acquire_calls);
+  result &= (acquire_calls == 2 || acquire_calls == 3);
+  result &= check_state(&state, acquire_calls, 0);
   if (alignment != 0) result &= ((uintptr_t)ptr % alignment == 0);
   if (zero) {
     for (size_t i = 0; i < size; ++i) result &= (((unsigned char*)ptr)[i] == 0);
@@ -1252,8 +1258,13 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   mi_free(ptr);
   mi_heap_collect(heap, true);
   mi_heap_destroy(heap);
-  result &= check_state(&state, 2, 1);
+  result &= check_state(&state, acquire_calls, 1);
   return (result && accounting_is_balanced(&state));
+}
+
+// Objects too large for an arena get a page directly from the OS; the veto comes before the OS allocation.
+static bool test_veto_os(void) {
+  return test_veto(mi_arena_max_object_size() + 1024 * 1024, 0, false);
 }
 
 static bool test_release_before_destroy(void) {
