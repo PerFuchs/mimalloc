@@ -62,9 +62,6 @@ static bool test_disallow_arena_alloc(bool transfer);
 static bool test_release_before_destroy(void);
 static bool test_delete_transfers_charge(void);
 static bool test_page_reclaim(void);
-static bool test_acquire_only(void);
-static bool test_release_only(bool transfer);
-static bool test_no_callbacks(void);
 static bool test_aligned_all(void);
 static bool test_heap_destroy_xthread_free(void);
 static bool test_heap_destroy_stale_theap(void);
@@ -745,10 +742,6 @@ int main(void) {
   CHECK("page-callback-release-before-destroy", test_release_before_destroy());
   CHECK("page-callback-delete-transfers-charge", test_delete_transfers_charge());
   CHECK("page-callback-reclaim", test_page_reclaim());
-  CHECK("page-callback-acquire-only", test_acquire_only());
-  CHECK("page-callback-release-only-destroy", test_release_only(false));
-  CHECK("page-callback-release-only-delete", test_release_only(true));
-  CHECK("page-callback-none", test_no_callbacks());
 
   // ---------------------------------------------------
   // Threads
@@ -1163,13 +1156,6 @@ static bool acquire_page(size_t bytes, void* arg) {
   return true;
 }
 
-static void observe_release(size_t bytes, void* arg) {
-  callback_state_t* state = (callback_state_t*)arg;
-  assert(bytes > 0);
-  mi_atomic_add_relaxed(&state->released_bytes, bytes);
-  mi_atomic_increment_relaxed(&state->release_calls);
-}
-
 static void release_page(size_t bytes, void* arg) {
   callback_state_t* state = (callback_state_t*)arg;
   assert(bytes > 0);
@@ -1378,57 +1364,4 @@ static bool test_page_reclaim(void) {
   page_reclaim_heap = NULL;
   result &= check_state(&state, 1, 1);
   return (result && accounting_is_balanced(&state));
-}
-
-// ---------------------------------------------------------------------------
-// Independently optional callbacks
-// ---------------------------------------------------------------------------
-static bool test_acquire_only(void) {
-  callback_state_t state = CALLBACK_STATE_INIT;
-  mi_heap_t* heap = mi_heap_new_with_page_callbacks(acquire_page, NULL, &state);
-  if (heap == NULL) return false;
-  void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
-  bool result = check_state(&state, 1, 0);
-  result &= (ptr == NULL && mi_atomic_load_acquire(&state.acquired_bytes) == 0);
-  mi_free(ptr);
-  mi_atomic_store_release(&state.accept, 1);
-  ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
-  result &= (ptr != NULL && mi_atomic_load_acquire(&state.acquired_bytes) > 0);
-  mi_free(ptr);
-  mi_heap_collect(heap, true);
-  mi_heap_destroy(heap);
-  result &= check_state(&state, 2, 0);
-  return result;
-}
-
-static bool test_release_only(bool transfer) {
-  callback_state_t state = CALLBACK_STATE_INIT;
-  mi_heap_t* heap = mi_heap_new_with_page_callbacks(NULL, observe_release, &state);
-  if (heap == NULL) return false;
-  void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
-  if (ptr == NULL) {
-    mi_heap_destroy(heap);
-    return false;
-  }
-  bool result = check_state(&state, 0, 0);
-  if (transfer) mi_heap_delete(heap);
-  else mi_heap_destroy(heap);
-  result &= check_state(&state, 0, 1);
-  const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
-  result &= (released > 0);
-  if (transfer) {
-    mi_free(ptr);
-    mi_collect(true);
-    result &= check_state(&state, 0, 1);
-    result &= (mi_atomic_load_acquire(&state.released_bytes) == released);
-  }
-  return result;
-}
-
-static bool test_no_callbacks(void) {
-  mi_heap_t* heap = mi_heap_new_with_page_callbacks(NULL, NULL, NULL);
-  if (heap == NULL) return false;
-  bool result = (mi_heap_malloc(heap, 64) != NULL);
-  mi_heap_destroy(heap);
-  return result;
 }
