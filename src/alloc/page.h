@@ -12,8 +12,8 @@ terms of the MIT license. A copy of the license can be found in the file
 #include "page-queue.h"
 
 bool       _mi_page_extend_free(mi_theap_t* theap, mi_page_t* page);
-mi_page_t* _mi_page_fresh_alloc(mi_theap_t* theap, mi_page_queue_t* pq, size_t block_size, size_t page_alignment);
-mi_page_t* _mi_page_fresh(mi_theap_t* theap, mi_page_queue_t* pq);
+mi_page_t* _mi_page_fresh_alloc(mi_theap_t* theap, mi_page_queue_t* pq, size_t block_size, size_t page_alignment, bool* rejected);
+mi_page_t* _mi_page_fresh(mi_theap_t* theap, mi_page_queue_t* pq, bool* rejected);
 void       _mi_page_to_full(mi_page_t* page, mi_page_queue_t* pq);
 void       _mi_page_update_sample_countdown(mi_page_t* page);
 

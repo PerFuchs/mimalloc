@@ -596,6 +596,9 @@ static uint8_t* mi_arenas_page_alloc_fresh_area(mi_theap_t* theap, size_t slice_
 // Free a page without modifying page_bin stats
 static void mi_arenas_page_free_prim(mi_page_t* page);
 
+// Free a page without calling the `release` callback
+static void mi_arenas_page_discard(mi_page_t* page, mi_theap_t* current_theapx);
+
 // Commit the start of the page up to and including the first block if the slices are not yet committed.
 // Sets `*commit_size` to the committed size (or 0 if the slices were already committed).
 // Never commits beyond `page_end` (the end guard page or the end of the page).
@@ -818,7 +821,7 @@ static mi_page_t* mi_arenas_page_regular_alloc(mi_theap_t* theap, size_t slice_c
 
   mi_assert_internal(page->memid.memkind != MI_MEM_ARENA || page->memid.mem.arena.slice_count == slice_count);
   if (!_mi_page_init(theap, page)) {
-    _mi_arenas_page_free(page,theap);
+    mi_arenas_page_discard(page,theap);
     return NULL;
   }
 
@@ -846,7 +849,7 @@ static mi_page_t* mi_arenas_page_singleton_alloc(mi_theap_t* theap, size_t block
 
   mi_assert(page->reserved == 1);
   if (!_mi_page_init(theap, page)) {
-    _mi_arenas_page_free(page,theap);
+    mi_arenas_page_discard(page,theap);
     return NULL;
   }
 
@@ -854,7 +857,7 @@ static mi_page_t* mi_arenas_page_singleton_alloc(mi_theap_t* theap, size_t block
 }
 
 
-mi_page_t* _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t block_alignment) {
+mi_page_t* _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t block_alignment, bool* rejected) {
   mi_page_t* page;
   // semi static assert: ensure that all non-singleton block size bins are covered.
   mi_assert(_mi_bin(MI_LARGE_MAX_OBJ_SIZE)  < MI_ARENA_BIN_COUNT);
@@ -884,6 +887,15 @@ mi_page_t* _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t bl
   mi_assert_internal(mi_ptr_page(mi_page_start(page))==page);
   mi_assert_internal(block_alignment <= MI_PAGE_MAX_OVERALLOC_ALIGN || mi_is_aligned(mi_page_start(page), block_alignment));
 
+  // a reclaimed abandoned page already belongs to this heap and stays charged
+  mi_heap_t* const heap = mi_page_heap(page);
+  if (!mi_page_is_abandoned(page) && heap->page_acquire != NULL &&
+      !heap->page_acquire(mi_page_full_size(page), heap->page_callbacks_arg)) {
+    *rejected = true;
+    mi_page_set_theap(page, NULL);
+    mi_arenas_page_discard(page, theap);
+    return NULL;
+  }
   return page;
 }
 
@@ -965,7 +977,8 @@ static void mi_arenas_page_free_prim(mi_page_t* page) {
   _mi_arenas_free( mi_page_subproc(page), mi_page_slice_start(page), mi_page_full_size(page), page->memid);
 }
 
-void _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx) {
+// Free a page and update its statistics without calling the `release` callback.
+static void mi_arenas_page_discard(mi_page_t* page, mi_theap_t* current_theapx) {
   mi_assert_internal(_mi_page_qsbr_is_clear(page));
   mi_assert_internal(mi_is_aligned(mi_page_slice_start(page), MI_PAGE_ALIGN));
   mi_assert_internal(mi_ptr_page(mi_page_start(page))==page);
@@ -981,6 +994,19 @@ void _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx) {
   _mi_page_free_collect(page,false);  // update used count for cross-thread free's
   _mi_page_update_stats(page);        // and update the stats
   mi_arenas_page_free_prim(page);
+}
+
+// Report that a page that was accepted by `acquire` leaves its heap.
+static void mi_page_callback_release(mi_page_t* page) {
+  mi_heap_t* const heap = mi_page_heap(page);
+  if (heap->page_release != NULL) {
+    heap->page_release(mi_page_full_size(page), heap->page_callbacks_arg);
+  }
+}
+
+void _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx) {
+  mi_page_callback_release(page);
+  mi_arenas_page_discard(page, current_theapx);
 }
 
 
@@ -1376,6 +1402,7 @@ static bool mi_heap_delete_page(const mi_heap_t* heap, const mi_heap_area_t* are
     _mi_arenas_page_free(page, theap);
   }
   else {
+    mi_page_callback_release(page);
     // move the page to `heap_target` as an abandoned page
     // first remove it from the current heap
     const size_t sbin = _mi_page_stats_bin(page);

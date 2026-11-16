@@ -45,7 +45,7 @@ static inline bool mi_page_free_quick_collect(mi_page_t* page) {
 
 
 // Find a page with free blocks of `page->block_size`.
-static mi_decl_noinline mi_page_t* mi_page_queue_find_free_ex(mi_theap_t* theap, mi_page_queue_t* pq, bool first_try)
+static mi_decl_noinline mi_page_t* mi_page_queue_find_free_ex(mi_theap_t* theap, mi_page_queue_t* pq, bool first_try, bool* rejected)
 {
   // search through the pages in "next fit" order
   size_t count = 0;
@@ -152,11 +152,11 @@ static mi_decl_noinline mi_page_t* mi_page_queue_find_free_ex(mi_theap_t* theap,
 
   if (page == NULL) {
     _mi_theap_collect_retired(theap, false); // perhaps make a page available
-    page = _mi_page_fresh(theap, pq);
+    page = _mi_page_fresh(theap, pq, rejected);
     mi_assert_internal(page == NULL || mi_page_immediate_available(page));
-    if (page == NULL && first_try) {
+    if (page == NULL && first_try && !*rejected) {
       // out-of-memory _or_ an abandoned page with free blocks was reclaimed, try once again
-      page = mi_page_queue_find_free_ex(theap, pq, false);
+      page = mi_page_queue_find_free_ex(theap, pq, false, rejected);
       mi_assert_internal(page == NULL || mi_page_immediate_available(page));
     }
   }
@@ -201,14 +201,14 @@ static inline mi_page_t* mi_page_queue_lookup_free_first(mi_theap_t* theap, mi_p
 }
 
 // Find a page with free blocks of `size`.
-static inline mi_page_t* mi_page_queue_find_free(mi_theap_t* theap, mi_page_queue_t* pq) {
+static inline mi_page_t* mi_page_queue_find_free(mi_theap_t* theap, mi_page_queue_t* pq, bool* rejected) {
   // mi_page_queue_t* pq = mi_page_queue(theap, size);
   mi_assert_internal(!mi_page_queue_is_huge(pq));
 
   // check the first page: we even do this with candidate search or otherwise we re-search every time
   mi_page_t* page = mi_page_queue_lookup_free_first(theap,pq);
   if (page==NULL) {
-    page = mi_page_queue_find_free_ex(theap, pq, true);
+    page = mi_page_queue_find_free_ex(theap, pq, true, rejected);
     if (page==NULL) return NULL;
   }
   mi_assert_internal(mi_page_immediate_available(page));
@@ -220,7 +220,7 @@ static inline mi_page_t* mi_page_queue_find_free(mi_theap_t* theap, mi_page_queu
 // Huge pages contain just one block, and the segment contains just that page.
 // Huge pages are also use if the requested alignment is very large (> MI_BLOCK_ALIGNMENT_MAX)
 // so their size is not always `> MI_LARGE_OBJ_SIZE_MAX`.
-static mi_page_t* mi_huge_page_alloc(mi_theap_t* theap, size_t size, size_t page_alignment, mi_page_queue_t* pq) {
+static mi_page_t* mi_huge_page_alloc(mi_theap_t* theap, size_t size, size_t page_alignment, mi_page_queue_t* pq, bool* rejected) {
   _mi_theap_qsbr_collect_delayed(theap);
   const size_t block_size = mi_bounds_size(_mi_os_good_alloc_size(size));
   // on CHERI, very large blocks need a large alignment for exact bounds: use an OS aligned page then (see `mi_page_meta_in_front_block_start`)
@@ -235,7 +235,7 @@ static mi_page_t* mi_huge_page_alloc(mi_theap_t* theap, size_t size, size_t page
   // mi_page_queue_t* pq = mi_page_queue(theap, MI_LARGE_MAX_OBJ_SIZE+1);  // always in the huge queue regardless of the block size
   mi_assert_internal(mi_page_queue_is_huge(pq));
   #endif
-  mi_page_t* page = _mi_page_fresh_alloc(theap, pq, block_size, page_alignment);
+  mi_page_t* page = _mi_page_fresh_alloc(theap, pq, block_size, page_alignment, rejected);
   if (page != NULL) {
     mi_assert_internal(mi_page_block_size(page) >= size);
     mi_assert_internal(mi_page_immediate_available(page));
@@ -253,7 +253,7 @@ static mi_page_t* mi_huge_page_alloc(mi_theap_t* theap, size_t size, size_t page
 
 // Allocate a page
 // Note: in debug mode the size includes MI_PADDING_SIZE and might have overflowed.
-static mi_page_t* mi_find_page(mi_theap_t* theap, size_t size, size_t huge_alignment) mi_attr_noexcept {
+static mi_page_t* mi_find_page(mi_theap_t* theap, size_t size, size_t huge_alignment, bool* rejected) mi_attr_noexcept {
   const size_t req_size = size - MI_PADDING_SIZE;  // correct for padding_size in case of an overflow on `size`
   if mi_unlikely(req_size > MI_MAX_ALLOC_SIZE) {   // TODO: remove as we check in generic_fallback ?
     _mi_error_message(EOVERFLOW, "allocation request is too large (%zu bytes)\n", req_size);
@@ -263,14 +263,14 @@ static mi_page_t* mi_find_page(mi_theap_t* theap, size_t size, size_t huge_align
   mi_page_t* page;
   // huge allocation?
   if mi_unlikely(mi_page_queue_is_huge(pq) || req_size > MI_MAX_ALLOC_SIZE) {
-    page = mi_huge_page_alloc(theap,size,huge_alignment,pq);
+    page = mi_huge_page_alloc(theap,size,huge_alignment,pq,rejected);
   }
   else {
     // otherwise find a page with free blocks in our size segregated queues
     #if MI_PADDING
     mi_assert_internal(size >= MI_PADDING_SIZE);
     #endif
-    page = mi_page_queue_find_free(theap,pq);
+    page = mi_page_queue_find_free(theap,pq,rejected);
   }
   if (page==NULL) return NULL;
   mi_assert_internal(mi_page_block_size(page) >= size);
@@ -386,15 +386,16 @@ static bool mi_malloc_generic_check_size(size_t size) {
 static void* mi_malloc_generic_from_page(mi_theap_t* theap, size_t size, bool zero, size_t huge_alignment, mi_page_t** ppage, size_t sample_countdown_adjust)
 {
   // find (or allocate) a page of the right size
-  mi_page_t* page = mi_find_page(theap, size, huge_alignment);
-  if mi_unlikely(page == NULL) { // first time out of memory, try to collect and retry the allocation once more
+  bool rejected = false;
+  mi_page_t* page = mi_find_page(theap, size, huge_alignment, &rejected);
+  if mi_unlikely(page == NULL && !rejected) { // first time out of memory, try to collect and retry the allocation once more
     mi_theap_collect(theap, true /* force? */);
-    page = mi_find_page(theap, size, huge_alignment);
+    page = mi_find_page(theap, size, huge_alignment, &rejected);
   }
 
-  if mi_unlikely(page == NULL) { // out of memory
+  if mi_unlikely(page == NULL) { // out of memory, or the `acquire` callback of the heap rejected a page (and set errno)
     theap->sample_countdown -= sample_countdown_adjust;  // unadjust again if we failed to find a page
-    _mi_error_message(ENOMEM, "unable to allocate memory (%zu bytes)\n", size - MI_PADDING_SIZE);
+    if (!rejected) { _mi_error_message(ENOMEM, "unable to allocate memory (%zu bytes)\n", size - MI_PADDING_SIZE); }
     return NULL;
   }
 
@@ -491,7 +492,9 @@ mi_decl_restrict void* _mi_malloc_generic(mi_theap_t* theap, size_t size, size_t
       {
         mi_page_queue_t* pq = mi_page_queue(theap, size);
         mi_assert_internal(pq!=NULL && !mi_page_queue_is_huge(pq));
-        page = mi_page_queue_find_free(theap,pq);
+        bool rejected = false;
+        page = mi_page_queue_find_free(theap,pq,&rejected);
+        if (rejected) return NULL;
         // mi_assert_internal(mi_page_block_size(page) <= MI_SMALL_MAX_OBJ_SIZE);
         if (page!=NULL) {
           if (ppage!=NULL) { *ppage = page; }
