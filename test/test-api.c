@@ -1352,6 +1352,8 @@ static bool reclaim_page_worker(void) {
   return result;
 }
 
+// The first worker leaves a live allocation behind, so its page is abandoned when the worker exits.
+// The next worker must reclaim that page and allocate successfully even though acquire rejects new pages.
 static bool test_page_reclaim(void) {
   callback_state_t state = CALLBACK_STATE_INIT;
   state.accept = 1;
