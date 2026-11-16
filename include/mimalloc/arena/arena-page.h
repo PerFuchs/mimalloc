@@ -10,7 +10,7 @@ terms of the MIT license. A copy of the license can be found in the file
 
 #include "../types.h"
 
-mi_page_t*    _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t page_alignment);
+mi_page_t*    _mi_arenas_page_alloc(mi_theap_t* theap, size_t block_size, size_t page_alignment, bool* rejected /* set on a callback veto */);
 void          _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx /* can be NULL */);
 void          _mi_arenas_page_abandon(mi_page_t* page, mi_theap_t* current_theap);
 void          _mi_arenas_page_unabandon(mi_page_t* page, mi_theap_t* current_theapx /* can be NULL */);

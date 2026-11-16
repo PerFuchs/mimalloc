@@ -480,7 +480,7 @@ void _mi_page_abandon(mi_page_t* page, mi_page_queue_t* pq) {
 
 
 // allocate a fresh page from an arena
-mi_page_t* _mi_page_fresh_alloc(mi_theap_t* theap, mi_page_queue_t* pq, size_t block_size, size_t page_alignment) {
+mi_page_t* _mi_page_fresh_alloc(mi_theap_t* theap, mi_page_queue_t* pq, size_t block_size, size_t page_alignment, bool* rejected) {
   #if !MI_HUGE_PAGE_ABANDON
   mi_assert_internal(pq != NULL);
   mi_assert_internal(mi_theap_contains_queue(theap, pq));
@@ -489,7 +489,7 @@ mi_page_t* _mi_page_fresh_alloc(mi_theap_t* theap, mi_page_queue_t* pq, size_t b
   mi_page_t* page;
   bool reclaimed;
   do {
-    page = _mi_arenas_page_alloc(theap, block_size, page_alignment);
+    page = _mi_arenas_page_alloc(theap, block_size, page_alignment, rejected);
     if (page == NULL) {
       // out-of-memory
       return NULL;
@@ -520,9 +520,9 @@ mi_page_t* _mi_page_fresh_alloc(mi_theap_t* theap, mi_page_queue_t* pq, size_t b
 }
 
 // Get a fresh page to use
-mi_page_t* _mi_page_fresh(mi_theap_t* theap, mi_page_queue_t* pq) {
+mi_page_t* _mi_page_fresh(mi_theap_t* theap, mi_page_queue_t* pq, bool* rejected) {
   mi_assert_internal(mi_theap_contains_queue(theap, pq));
-  mi_page_t* page = _mi_page_fresh_alloc(theap, pq, pq->block_size, 0);
+  mi_page_t* page = _mi_page_fresh_alloc(theap, pq, pq->block_size, 0, rejected);
   if (page==NULL) return NULL;
   mi_assert_internal(pq->block_size==mi_page_block_size(page));
   mi_assert_internal(pq==mi_theap_page_queue_of(theap, page));

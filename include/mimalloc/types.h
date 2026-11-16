@@ -756,6 +756,10 @@ typedef struct mi_heap_s {
   #endif
   _Atomic(size_t)       debug_fill_preserve;            // in debug mode, the first N bytes of a block are not filled with MI_DEBUG_UNINIT/FREED
 
+  mi_page_acquire_fun_t* page_acquire_fun;              // called before a page is added to the heap; can veto the allocation
+  mi_page_release_fun_t* page_release_fun;              // called once for each accepted page that leaves the heap
+  void*                 page_fun_arg;                   // user argument for the page callbacks
+
   mi_theap_t*           theaps;                         // list of all thread-local theaps belonging to this heap (using the `hnext`/`hprev` fields)
   mi_lock_t             theaps_lock;                    // protects the theaps list and serializes heap walks with thread-exit abandonment
 

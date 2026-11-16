@@ -222,7 +222,7 @@ static void mi_heap_main_init_once(void) {
   mi_heap_t* const heap_main = &_mi_process.heap_main;
   heap_main->memid = memid_static;
   mi_atomic_store_ptr_release(mi_heap_t,&subproc_main->heap_main,heap_main);
-  _mi_heap_init(heap_main,mi_thread_local_key_fast,subproc_main,0,false);
+  _mi_heap_init(heap_main,mi_thread_local_key_fast,subproc_main,0,false,NULL,NULL,NULL);
 
   // detached theap for allocating meta-data (we can allocate on this without having an initialized thread)
   mi_theap_t* const theap_meta = &_mi_process.theap_meta;

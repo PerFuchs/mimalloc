@@ -56,6 +56,12 @@ bool test_stl_theap_allocator3(void);
 bool test_stl_theap_allocator4(void);
 
 static bool test_zero_aligned_first(void);
+static bool test_veto(size_t size, size_t alignment, bool zero);
+static bool test_veto_os(void);
+static bool test_disallow_arena_alloc(bool transfer);
+static bool test_release_before_destroy(void);
+static bool test_delete_transfers_charge(void);
+static bool test_page_reclaim(void);
 static bool test_aligned_all(void);
 static bool test_heap_destroy_xthread_free(void);
 static bool test_heap_destroy_stale_theap(void);
@@ -720,6 +726,24 @@ int main(void) {
 
 
   // ---------------------------------------------------
+  // Page callbacks
+  // ---------------------------------------------------
+  CHECK("page-callback-veto-tiny", test_veto(1, 0, false));
+  CHECK("page-callback-veto-small", test_veto(37, 0, false));
+  CHECK("page-callback-veto-8KiB", test_veto(8192, 0, false));
+  CHECK("page-callback-veto-64KiB", test_veto(65536, 0, false));
+  CHECK("page-callback-veto-1MiB", test_veto(1024 * 1024, 0, false));
+  CHECK("page-callback-veto-8MiB", test_veto(8 * 1024 * 1024, 0, false));
+  CHECK("page-callback-veto-aligned", test_veto(97, 1024 * 1024, false));
+  CHECK("page-callback-veto-zero", test_veto(128, 0, true));
+  CHECK("page-callback-veto-os", test_veto_os());
+  CHECK("page-callback-disallow-arena-alloc-destroy", test_disallow_arena_alloc(false));
+  CHECK("page-callback-disallow-arena-alloc-delete", test_disallow_arena_alloc(true));
+  CHECK("page-callback-release-before-destroy", test_release_before_destroy());
+  CHECK("page-callback-delete-transfers-charge", test_delete_transfers_charge());
+  CHECK("page-callback-reclaim", test_page_reclaim());
+
+  // ---------------------------------------------------
   // Threads
   // ---------------------------------------------------
   CHECK_THREADS_BODY("thread_zero_aligned_first") {
@@ -1100,4 +1124,222 @@ static bool test_heap_destroy_stale_theap(void) {
 
   if (!reused) { fprintf(stderr, "(heap address not reused, inconclusive) "); }
   return stale_result;
+}
+
+// ---------------------------------------------------------------------------
+// Callback helpers
+// ---------------------------------------------------------------------------
+typedef struct callback_state_s {
+  uintptr_t accept;
+  uintptr_t acquire_calls;
+  uintptr_t release_calls;
+  uintptr_t acquired_bytes;
+  uintptr_t released_bytes;
+  uintptr_t callback_errors;
+} callback_state_t;
+
+#define CALLBACK_STATE_INIT { 0, 0, 0, 0, 0, 0 }
+
+static bool acquire_page(size_t bytes, void* arg) {
+  callback_state_t* state = (callback_state_t*)arg;
+  assert(bytes > 0);
+  state->acquire_calls++;
+  if (!state->accept) {
+    return false;
+  }
+  state->acquired_bytes += bytes;
+  return true;
+}
+
+static void release_page(size_t bytes, void* arg) {
+  callback_state_t* state = (callback_state_t*)arg;
+  assert(bytes > 0);
+  const uintptr_t before = state->released_bytes;
+  state->released_bytes += bytes;
+  if (before + bytes > state->acquired_bytes) {
+    state->callback_errors++;
+  }
+  state->release_calls++;
+}
+
+// Error counters default to zero; callers specify only the expected call counts.
+static bool check_state(callback_state_t* state, uintptr_t expected_acquire_calls, uintptr_t expected_release_calls) {
+  const uintptr_t acquire_calls = state->acquire_calls;
+  const uintptr_t release_calls = state->release_calls;
+  const uintptr_t callback_errors = state->callback_errors;
+  const bool result = (acquire_calls == expected_acquire_calls && release_calls == expected_release_calls &&
+                       callback_errors == 0);
+  if (!result) {
+    fprintf(stderr, "page callbacks: acquire calls %zu (expected %zu), release calls %zu (expected %zu), "
+                    "callback errors %zu (expected zero)\n",
+            (size_t)acquire_calls, (size_t)expected_acquire_calls, (size_t)release_calls, (size_t)expected_release_calls,
+            (size_t)callback_errors);
+  }
+  return result;
+}
+
+static bool accounting_is_balanced(callback_state_t* state) {
+  const uintptr_t acquired = state->acquired_bytes;
+  const uintptr_t released = state->released_bytes;
+  if (acquired != released) {
+    fprintf(stderr, "page callbacks: acquired bytes %zu != released bytes %zu\n", (size_t)acquired, (size_t)released);
+  }
+  return (acquired == released);
+}
+
+static mi_heap_t* new_heap(callback_state_t* state) {
+  return mi_heap_new_with_page_callbacks(acquire_page, release_page, state);
+}
+
+// ---------------------------------------------------------------------------
+// Page acquisition and release
+// ---------------------------------------------------------------------------
+static bool test_veto(size_t size, size_t alignment, bool zero) {
+  callback_state_t state = CALLBACK_STATE_INIT;
+  mi_heap_t* heap = new_heap(&state);
+  if (heap == NULL) return false;
+  errno = EINVAL;  // a veto must overwrite an earlier error
+  void* ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
+                              : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
+  bool result = check_state(&state, 1, 0);
+  result &= (ptr == NULL && errno == ENOMEM);
+  mi_free(ptr);
+  state.accept = 1;
+  ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
+                       : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
+  if (ptr == NULL) {
+    fprintf(stderr, "page callbacks: recovery allocation failed (size %zu, alignment %zu, zero %d)\n", size, alignment, (int)zero);
+    mi_heap_destroy(heap);
+    return false;
+  }
+  // an OS page that is larger than its slices gets a second acquire call for the extra bytes
+  const uintptr_t acquire_calls = state.acquire_calls;
+  result &= (acquire_calls == 2 || acquire_calls == 3);
+  result &= check_state(&state, acquire_calls, 0);
+  if (alignment != 0) result &= ((uintptr_t)ptr % alignment == 0);
+  if (zero) {
+    for (size_t i = 0; i < size; ++i) result &= (((unsigned char*)ptr)[i] == 0);
+  }
+  mi_free(ptr);
+  mi_heap_collect(heap, true);
+  mi_heap_destroy(heap);
+  result &= check_state(&state, acquire_calls, 1);
+  return (result && accounting_is_balanced(&state));
+}
+
+// Test callbacks for pages served by the OS rather than arena.
+static bool test_veto_os(void) {
+  return test_veto(mi_arena_max_object_size() + 1024 * 1024, 0, false);
+}
+
+// Test allocations and deallocation with callbacks under the arena allocation disallowed setting.
+static bool test_disallow_arena_alloc(bool transfer) {
+  callback_state_t state = CALLBACK_STATE_INIT;
+  const long disallow_arena_alloc = mi_option_get(mi_option_disallow_arena_alloc);
+  mi_option_enable(mi_option_disallow_arena_alloc);
+  mi_heap_t* heap = new_heap(&state);
+  bool result = (heap != NULL);
+  if (result) {
+    errno = 0;
+    void* small = mi_heap_malloc(heap, 37);
+    result &= (small == NULL && errno == ENOMEM);
+    result &= check_state(&state, 1, 0);
+    state.accept = 1;
+    small = mi_heap_malloc(heap, 37);
+    void* large = mi_heap_malloc(heap, 8 * 1024 * 1024);
+    // the 8 MiB OS page can be larger than its slices and then gets a second acquire call
+    const uintptr_t acquire_calls = state.acquire_calls;
+    result &= (small != NULL && large != NULL && (acquire_calls == 3 || acquire_calls == 4));
+    result &= check_state(&state, acquire_calls, 0);
+    if (transfer) mi_heap_delete(heap);
+    else mi_heap_destroy(heap);
+    result &= check_state(&state, acquire_calls, 2);
+    if (transfer) {
+      mi_free(small);
+      mi_free(large);
+      mi_collect(true);
+      result &= check_state(&state, acquire_calls, 2);
+    }
+  }
+  mi_option_set(mi_option_disallow_arena_alloc, disallow_arena_alloc);
+  return (result && accounting_is_balanced(&state));
+}
+
+static bool test_release_before_destroy(void) {
+  callback_state_t state = CALLBACK_STATE_INIT;
+  state.accept = 1;
+  mi_heap_t* heap = new_heap(&state);
+  if (heap == NULL) return false;
+  void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
+  if (ptr == NULL) {
+    mi_heap_destroy(heap);
+    return false;
+  }
+  mi_free(ptr);
+  mi_heap_collect(heap, true);
+  bool result = (check_state(&state, 1, 1) && accounting_is_balanced(&state));
+  const uintptr_t released = state.released_bytes;
+  mi_heap_destroy(heap);
+  result &= check_state(&state, 1, 1);
+  return (result && state.released_bytes == released && accounting_is_balanced(&state));
+}
+
+// Test that delete releases the heap's charge while pointers stay valid (pages move to the main heap).
+static bool test_delete_transfers_charge(void) {
+  callback_state_t state = CALLBACK_STATE_INIT;
+  state.accept = 1;
+  mi_heap_t* heap = new_heap(&state);
+  if (heap == NULL) return false;
+  void* ptr = mi_heap_malloc(heap, 64);
+  if (ptr == NULL) {
+    mi_heap_destroy(heap);
+    return false;
+  }
+  bool result = (state.acquired_bytes > 0);
+  mi_heap_delete(heap);
+  result &= (check_state(&state, 1, 1) && accounting_is_balanced(&state));
+  const uintptr_t released = state.released_bytes;
+  mi_free(ptr);
+  mi_collect(true);
+  result &= check_state(&state, 1, 1);
+  return (result && state.released_bytes == released && accounting_is_balanced(&state));
+}
+
+// ---------------------------------------------------------------------------
+// Reclaim an abandoned page without acquiring it again
+// ---------------------------------------------------------------------------
+static mi_heap_t* page_reclaim_heap; // shared only by two sequential workers
+
+static bool abandon_page_worker(void) {
+  // Exercise reusable pages instead of guarded singleton allocations.
+  mi_theap_guarded_set_sample_rate(mi_heap_theap(page_reclaim_heap), 0, 0);
+  // The live block keeps the page charged when this thread exits.
+  return (mi_heap_malloc(page_reclaim_heap, 37) != NULL);
+}
+
+static bool reclaim_page_worker(void) {
+  mi_theap_guarded_set_sample_rate(mi_heap_theap(page_reclaim_heap), 0, 0);
+  void* ptr = mi_heap_malloc(page_reclaim_heap, 37);
+  const bool result = (ptr != NULL);
+  mi_free(ptr);
+  return result;
+}
+
+// The first worker leaves a live allocation behind, so its page is abandoned when the worker exits.
+// The next worker must reclaim that page and allocate successfully even though the acquire would reject new pages because no new page is needed.
+static bool test_page_reclaim(void) {
+  callback_state_t state = CALLBACK_STATE_INIT;
+  state.accept = 1;
+  page_reclaim_heap = new_heap(&state);
+  if (page_reclaim_heap == NULL) return false;
+  bool result = mi_run_on_thread(&abandon_page_worker);
+  result &= check_state(&state, 1, 0);
+  // Reclamation must succeed even when acquiring a new page would be rejected.
+  state.accept = 0;
+  if (result) result = mi_run_on_thread(&reclaim_page_worker);
+  result &= check_state(&state, 1, 0);
+  mi_heap_destroy(page_reclaim_heap);
+  page_reclaim_heap = NULL;
+  result &= check_state(&state, 1, 1);
+  return (result && accounting_is_balanced(&state));
 }

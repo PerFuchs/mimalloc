@@ -12,7 +12,8 @@ terms of the MIT license. A copy of the license can be found in the file
 #include "process.h"
 #include "subproc.h"
 
-void          _mi_heap_init(mi_heap_t* heap, mi_thread_local_t theap, mi_subproc_t* subproc, mi_arena_id_t exclusive_arena_id, bool use_qsbr);
+void          _mi_heap_init(mi_heap_t* heap, mi_thread_local_t theap, mi_subproc_t* subproc, mi_arena_id_t exclusive_arena_id, bool use_qsbr,
+                            mi_page_acquire_fun_t* page_acquire_fun, mi_page_release_fun_t* page_release_fun, void* page_fun_arg);
 mi_decl_cold  mi_theap_t* _mi_heap_theap_get_or_init(const mi_heap_t* heap);  // get (and possible create) the theap belonging to a heap
 void          _mi_heap_force_destroy(mi_heap_t* heap, bool acquire_heaps_lock); // allow destroying the main heap
 mi_heap_t*    _mi_heap_new_for_subproc(mi_subproc_t* subproc, mi_arena_id_t exclusive_arena_id, bool is_heap_main, bool use_qsbr);

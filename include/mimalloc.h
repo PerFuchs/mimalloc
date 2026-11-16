@@ -360,6 +360,19 @@ mi_decl_export bool   mi_arena_contains(mi_arena_id_t arena_id, const void* p);
 // Create a heap that only allocates in the specified arena
 mi_decl_nodiscard mi_decl_export mi_heap_t* mi_heap_new_in_arena(mi_arena_id_t arena_id);
 
+// Create a heap that reports every page it adds or gives up, for example to enforce a memory budget.
+// `acquire` is called with the page size before the page memory is allocated. A page
+// allocated directly from the OS can be larger (its mapping is rounded up); `acquire` is then called
+// again after allocation with only the extra bytes. Returning false fails the allocation as out of
+// memory (ENOMEM, see `mi_register_error`). Each accepted page gets one `release` call with the sum of
+// its accepted bytes when it is freed or moved to the main heap (abandoned pages stay charged), so the
+// sizes balance once the heap is deleted or destroyed. Either callback may be NULL. Callbacks can run
+// concurrently on any thread, also during thread and process exit, and must not throw; `arg` must stay
+// valid while they can run.
+typedef bool (mi_cdecl mi_page_acquire_fun_t)(size_t bytes, void* arg);
+typedef void (mi_cdecl mi_page_release_fun_t)(size_t bytes, void* arg);
+mi_decl_nodiscard mi_decl_export mi_heap_t* mi_heap_new_with_page_callbacks(mi_page_acquire_fun_t* acquire, mi_page_release_fun_t* release, void* arg);
+
 
 // ------------------------------------------------------
 // Subprocesses

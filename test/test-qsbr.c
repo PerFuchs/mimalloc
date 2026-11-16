@@ -78,6 +78,11 @@ static size_t qsbr_count(mi_theap_t* theap) {
   return count;
 }
 
+static mi_page_t* page_fresh(mi_theap_t* theap, mi_page_queue_t* pq) {
+  bool rejected = false;
+  return _mi_page_fresh(theap, pq, &rejected);
+}
+
 static bool count_area(const mi_heap_t* heap, const mi_heap_area_t* area, void* block, size_t size, void* arg) {
   MI_UNUSED(heap); MI_UNUSED(area); MI_UNUSED(block); MI_UNUSED(size);
   (*(size_t*)arg)++;
@@ -382,7 +387,7 @@ static bool test_reclaim(void) {
   mi_free(newer);
   mi_heap_collect(worker_heap, true);
   require(theap->qsbr_first == newer_page && newer_page->qsbr.goal > worker_goal);
-  mi_page_t* reclaimed = _mi_page_fresh(theap, mi_page_queue(theap, worker_size + MI_PADDING_SIZE));
+  mi_page_t* reclaimed = page_fresh(theap, mi_page_queue(theap, worker_size + MI_PADDING_SIZE));
   require(reclaimed == worker_page && reclaimed->qsbr.goal == worker_goal);
   require(theap->qsbr_first == newer_page && theap->qsbr_last == reclaimed && qsbr_count(theap) == 2);
   mi_atomic_store_release(&domain.completed, worker_goal);
@@ -452,7 +457,7 @@ static bool test_reclaim_ready_pages(void) {
   _mi_theap_collect_abandon(theap);
   require(page_count(heap) == 3 && theap->page_count == 0);
   qsbr_complete();
-  mi_page_t* page = _mi_page_fresh(theap, mi_page_queue(theap, 8192 + MI_PADDING_SIZE));
+  mi_page_t* page = page_fresh(theap, mi_page_queue(theap, 8192 + MI_PADDING_SIZE));
   require(page != NULL && mi_page_immediate_available(page));
   require(page_count(heap) == 1 && _mi_page_qsbr_is_clear(page));
   mi_heap_destroy(heap);
@@ -583,7 +588,7 @@ static bool test_full_page_free_during_unown(void) {
   require(goal != 0 && !mi_page_qsbr_is_in_queue(page));
   const size_t bin = _mi_bin(mi_page_block_size(page));
   require(mi_atomic_load_relaxed(&heap->abandoned_count[bin]) == 1);
-  mi_page_t* reclaimed = _mi_page_fresh(theap, mi_page_queue(theap, size + MI_PADDING_SIZE));
+  mi_page_t* reclaimed = page_fresh(theap, mi_page_queue(theap, size + MI_PADDING_SIZE));
   require(reclaimed == page && page->qsbr.goal == goal && mi_page_qsbr_is_in_queue(page));
   require(mi_atomic_load_relaxed(&heap->abandoned_count[bin]) == 0);
   void* p = mi_heap_malloc(heap, size);
