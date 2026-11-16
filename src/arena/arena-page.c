@@ -827,9 +827,9 @@ static mi_page_t* mi_arenas_page_alloc_fresh_charged(mi_theap_t* theap, size_t s
   const size_t full_size = mi_page_full_size(page);
   mi_assert_internal(full_size >= charge);
   if (full_size > charge && !mi_arenas_page_acquire(heap, full_size - charge, rejected)) {
-    mi_arenas_page_unacquire(heap, charge);
     mi_page_set_theap(page, NULL);
     mi_arenas_page_discard(page, theap);
+    mi_arenas_page_unacquire(heap, charge);  // only after the memory is freed
     return NULL;
   }
   return page;
@@ -1034,9 +1034,16 @@ static void mi_arenas_page_release(mi_page_t* page) {
   }
 }
 
+// Free a page and only then call `release`, so the charge of a heap never drops below the memory
+// its pages hold (which a limit enforced by `acquire` relies on). The callback and size are read
+// first, as the freed page meta data can be reused right away.
 void _mi_arenas_page_free(mi_page_t* page, mi_theap_t* current_theapx) {
-  mi_arenas_page_release(page);
+  mi_heap_t* const heap = mi_page_heap(page);
+  mi_page_release_fun_t* const release_fun = heap->page_release_fun;
+  void* const release_arg = heap->page_fun_arg;
+  const size_t size = mi_page_full_size(page);
   mi_arenas_page_discard(page, current_theapx);
+  if (release_fun != NULL) { release_fun(size, release_arg); }
 }
 
 
