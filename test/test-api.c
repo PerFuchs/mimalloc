@@ -1144,11 +1144,12 @@ typedef struct callback_state_s {
   _Atomic(uintptr_t) released_bytes;
   _Atomic(uintptr_t) vetoed;
   _Atomic(uintptr_t) deferred_after_veto;
+  _Atomic(uintptr_t) nomem_errors;
   _Atomic(uintptr_t) errors;
   _Atomic(uintptr_t) callback_errors;
 } callback_state_t;
 
-#define CALLBACK_STATE_INIT { 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+#define CALLBACK_STATE_INIT { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 static bool acquire_page(size_t bytes, void* arg) {
   callback_state_t* state = (callback_state_t*)arg;
@@ -1220,9 +1221,8 @@ static void deferred_free(bool force, unsigned long long heartbeat, void* arg) {
 }
 
 static void error_handler(int error, void* arg) {
-  (void)error;
   callback_state_t* state = (callback_state_t*)arg;
-  mi_atomic_increment_relaxed(&state->errors);
+  mi_atomic_increment_relaxed(error == ENOMEM ? &state->nomem_errors : &state->errors);
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,11 +1234,11 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   if (heap == NULL) return false;
   mi_register_deferred_free(deferred_free, &state);
   mi_register_error(error_handler, &state);
-  errno = 0;
+  errno = EINVAL;  // a veto must overwrite an earlier error
   void* ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
                               : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
   bool result = check_state(&state, 1, 0);
-  result &= (ptr == NULL && errno == ENOMEM);
+  result &= (ptr == NULL && errno == ENOMEM && mi_atomic_load_acquire(&state.nomem_errors) == 1);
   mi_register_deferred_free(NULL, NULL);
   mi_register_error(NULL, NULL);
   mi_free(ptr);

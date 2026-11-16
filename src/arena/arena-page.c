@@ -795,11 +795,10 @@ static mi_page_t* mi_arenas_page_alloc_fresh(mi_theap_t* theap, size_t slice_cou
   return page;
 }
 
-// Ask the heap to accept a new page of `bytes`; a veto sets `*rejected` and `errno`.
+// Ask the heap to accept a new page of `bytes`; a veto sets `*rejected`.
 static bool mi_arenas_page_acquire(mi_heap_t* heap, size_t bytes, bool* rejected) {
   if (heap->page_acquire_fun == NULL || heap->page_acquire_fun(bytes, heap->page_fun_arg)) return true;
   *rejected = true;
-  errno = ENOMEM;
   return false;
 }
 

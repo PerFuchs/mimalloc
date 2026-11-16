@@ -382,6 +382,15 @@ static bool mi_malloc_generic_check_size(size_t size) {
   return true;
 }
 
+// Report a failed allocation. `errno` is set here as neither the OS (on some platforms) nor a rejecting
+// `acquire` callback of the heap sets it, and the default error handler keeps an earlier nonzero `errno`.
+static mi_decl_noinline void* mi_malloc_generic_out_of_memory(size_t size, bool rejected) {
+  errno = ENOMEM;
+  if (rejected) { _mi_error_message(ENOMEM, "unable to allocate memory (%zu bytes): the page acquire callback of the heap rejected a page\n", size - MI_PADDING_SIZE); }
+           else { _mi_error_message(ENOMEM, "unable to allocate memory (%zu bytes)\n", size - MI_PADDING_SIZE); }
+  return NULL;
+}
+
 // Allocate from a page of the right size (without sampling)
 static void* mi_malloc_generic_from_page(mi_theap_t* theap, size_t size, bool zero, size_t huge_alignment, mi_page_t** ppage, size_t sample_countdown_adjust)
 {
@@ -393,10 +402,9 @@ static void* mi_malloc_generic_from_page(mi_theap_t* theap, size_t size, bool ze
     page = mi_find_page(theap, size, huge_alignment, &rejected);
   }
 
-  if mi_unlikely(page == NULL) { // out of memory, or the `acquire` callback of the heap rejected a page (and set errno)
+  if mi_unlikely(page == NULL) { // out of memory, or the `acquire` callback of the heap rejected a page
     theap->sample_countdown -= sample_countdown_adjust;  // unadjust again if we failed to find a page
-    if (!rejected) { _mi_error_message(ENOMEM, "unable to allocate memory (%zu bytes)\n", size - MI_PADDING_SIZE); }
-    return NULL;
+    return mi_malloc_generic_out_of_memory(size, rejected);
   }
 
   mi_assert_internal(mi_page_immediate_available(page));
@@ -494,7 +502,7 @@ mi_decl_restrict void* _mi_malloc_generic(mi_theap_t* theap, size_t size, size_t
         mi_assert_internal(pq!=NULL && !mi_page_queue_is_huge(pq));
         bool rejected = false;
         page = mi_page_queue_find_free(theap,pq,&rejected);
-        if (rejected) return NULL;
+        if (rejected) return mi_malloc_generic_out_of_memory(size, true);
         // mi_assert_internal(mi_page_block_size(page) <= MI_SMALL_MAX_OBJ_SIZE);
         if (page!=NULL) {
           if (ppage!=NULL) { *ppage = page; }
