@@ -58,6 +58,7 @@ bool test_stl_theap_allocator4(void);
 static bool test_zero_aligned_first(void);
 static bool test_veto(size_t size, size_t alignment, bool zero);
 static bool test_veto_os(void);
+static bool test_disallow_arena_alloc(bool transfer);
 static bool test_release_before_destroy(void);
 static bool test_delete_transfers_charge(void);
 static bool test_page_reclaim(void);
@@ -739,6 +740,8 @@ int main(void) {
   CHECK("page-callback-veto-aligned", test_veto(97, 1024 * 1024, false));
   CHECK("page-callback-veto-zero", test_veto(128, 0, true));
   CHECK("page-callback-veto-os", test_veto_os());
+  CHECK("page-callback-disallow-arena-alloc-destroy", test_disallow_arena_alloc(false));
+  CHECK("page-callback-disallow-arena-alloc-delete", test_disallow_arena_alloc(true));
   CHECK("page-callback-release-before-destroy", test_release_before_destroy());
   CHECK("page-callback-delete-transfers-charge", test_delete_transfers_charge());
   CHECK("page-callback-reclaim", test_page_reclaim());
@@ -1265,6 +1268,40 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
 // Objects too large for an arena get a page directly from the OS; the veto comes before the OS allocation.
 static bool test_veto_os(void) {
   return test_veto(mi_arena_max_object_size() + 1024 * 1024, 0, false);
+}
+
+// With arena allocation disallowed, every page comes from the OS and is offered after allocation.
+// `mi_heap_delete` and `mi_heap_destroy` must still find the pages that a thread owns.
+static bool test_disallow_arena_alloc(bool transfer) {
+  callback_state_t state = CALLBACK_STATE_INIT;
+  const long disallow_arena_alloc = mi_option_get(mi_option_disallow_arena_alloc);
+  mi_option_enable(mi_option_disallow_arena_alloc);
+  mi_heap_t* heap = new_heap(&state);
+  bool result = (heap != NULL);
+  if (result) {
+    errno = 0;
+    void* small = mi_heap_malloc(heap, 37);
+    result &= (small == NULL && errno == ENOMEM);
+    result &= check_state(&state, 1, 0);
+    mi_atomic_store_release(&state.accept, 1);
+    small = mi_heap_malloc(heap, 37);
+    void* large = mi_heap_malloc(heap, 8 * 1024 * 1024);
+    // the 8 MiB OS page can be larger than its slices and then gets a second acquire call
+    const uintptr_t acquire_calls = mi_atomic_load_acquire(&state.acquire_calls);
+    result &= (small != NULL && large != NULL && (acquire_calls == 3 || acquire_calls == 4));
+    result &= check_state(&state, acquire_calls, 0);
+    if (transfer) mi_heap_delete(heap);
+    else mi_heap_destroy(heap);
+    result &= check_state(&state, acquire_calls, 2);
+    if (transfer) {
+      mi_free(small);
+      mi_free(large);
+      mi_collect(true);
+      result &= check_state(&state, acquire_calls, 2);
+    }
+  }
+  mi_option_set(mi_option_disallow_arena_alloc, disallow_arena_alloc);
+  return (result && accounting_is_balanced(&state));
 }
 
 static bool test_release_before_destroy(void) {
