@@ -1129,17 +1129,18 @@ static bool test_heap_destroy_stale_theap(void) {
 // ---------------------------------------------------------------------------
 // Callback helpers
 // ---------------------------------------------------------------------------
+// These tests invoke callbacks serially; the page-reclaim workers run one at a time.
 typedef struct callback_state_s {
-  _Atomic(uintptr_t) accept;
-  _Atomic(uintptr_t) acquire_calls;
-  _Atomic(uintptr_t) release_calls;
-  _Atomic(uintptr_t) acquired_bytes;
-  _Atomic(uintptr_t) released_bytes;
-  _Atomic(uintptr_t) vetoed;
-  _Atomic(uintptr_t) deferred_after_veto;
-  _Atomic(uintptr_t) nomem_errors;
-  _Atomic(uintptr_t) errors;
-  _Atomic(uintptr_t) callback_errors;
+  uintptr_t accept;
+  uintptr_t acquire_calls;
+  uintptr_t release_calls;
+  uintptr_t acquired_bytes;
+  uintptr_t released_bytes;
+  uintptr_t vetoed;
+  uintptr_t deferred_after_veto;
+  uintptr_t nomem_errors;
+  uintptr_t errors;
+  uintptr_t callback_errors;
 } callback_state_t;
 
 #define CALLBACK_STATE_INIT { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
@@ -1147,32 +1148,33 @@ typedef struct callback_state_s {
 static bool acquire_page(size_t bytes, void* arg) {
   callback_state_t* state = (callback_state_t*)arg;
   assert(bytes > 0);
-  mi_atomic_increment_relaxed(&state->acquire_calls);
-  if (!mi_atomic_load_acquire(&state->accept)) {
-    mi_atomic_store_release(&state->vetoed, 1);
+  state->acquire_calls++;
+  if (!state->accept) {
+    state->vetoed = 1;
     return false;
   }
-  mi_atomic_add_relaxed(&state->acquired_bytes, bytes);
+  state->acquired_bytes += bytes;
   return true;
 }
 
 static void release_page(size_t bytes, void* arg) {
   callback_state_t* state = (callback_state_t*)arg;
   assert(bytes > 0);
-  const uintptr_t before = mi_atomic_add_relaxed(&state->released_bytes, bytes);
-  if (before + bytes > mi_atomic_load_acquire(&state->acquired_bytes)) {
-    mi_atomic_increment_relaxed(&state->callback_errors);
+  const uintptr_t before = state->released_bytes;
+  state->released_bytes += bytes;
+  if (before + bytes > state->acquired_bytes) {
+    state->callback_errors++;
   }
-  mi_atomic_increment_relaxed(&state->release_calls);
+  state->release_calls++;
 }
 
 // Error counters default to zero; callers specify only the expected call counts.
 static bool check_state(callback_state_t* state, uintptr_t expected_acquire_calls, uintptr_t expected_release_calls) {
-  const uintptr_t acquire_calls = mi_atomic_load_acquire(&state->acquire_calls);
-  const uintptr_t release_calls = mi_atomic_load_acquire(&state->release_calls);
-  const uintptr_t deferred_after_veto = mi_atomic_load_acquire(&state->deferred_after_veto);
-  const uintptr_t errors = mi_atomic_load_acquire(&state->errors);
-  const uintptr_t callback_errors = mi_atomic_load_acquire(&state->callback_errors);
+  const uintptr_t acquire_calls = state->acquire_calls;
+  const uintptr_t release_calls = state->release_calls;
+  const uintptr_t deferred_after_veto = state->deferred_after_veto;
+  const uintptr_t errors = state->errors;
+  const uintptr_t callback_errors = state->callback_errors;
   const bool result = (acquire_calls == expected_acquire_calls && release_calls == expected_release_calls &&
                        deferred_after_veto == 0 && errors == 0 && callback_errors == 0);
   if (!result) {
@@ -1185,8 +1187,8 @@ static bool check_state(callback_state_t* state, uintptr_t expected_acquire_call
 }
 
 static bool accounting_is_balanced(callback_state_t* state) {
-  const uintptr_t acquired = mi_atomic_load_acquire(&state->acquired_bytes);
-  const uintptr_t released = mi_atomic_load_acquire(&state->released_bytes);
+  const uintptr_t acquired = state->acquired_bytes;
+  const uintptr_t released = state->released_bytes;
   if (acquired != released) {
     fprintf(stderr, "page callbacks: acquired bytes %zu != released bytes %zu\n", (size_t)acquired, (size_t)released);
   }
@@ -1201,14 +1203,15 @@ static void deferred_free(bool force, unsigned long long heartbeat, void* arg) {
   (void)force;
   (void)heartbeat;
   callback_state_t* state = (callback_state_t*)arg;
-  if (mi_atomic_load_acquire(&state->vetoed)) {
-    mi_atomic_increment_relaxed(&state->deferred_after_veto);
+  if (state->vetoed) {
+    state->deferred_after_veto++;
   }
 }
 
 static void error_handler(int error, void* arg) {
   callback_state_t* state = (callback_state_t*)arg;
-  mi_atomic_increment_relaxed(error == ENOMEM ? &state->nomem_errors : &state->errors);
+  if (error == ENOMEM) state->nomem_errors++;
+  else state->errors++;
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,11 +1227,11 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   void* ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
                               : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
   bool result = check_state(&state, 1, 0);
-  result &= (ptr == NULL && errno == ENOMEM && mi_atomic_load_acquire(&state.nomem_errors) == 1);
+  result &= (ptr == NULL && errno == ENOMEM && state.nomem_errors == 1);
   mi_register_deferred_free(NULL, NULL);
   mi_register_error(NULL, NULL);
   mi_free(ptr);
-  mi_atomic_store_release(&state.accept, 1);
+  state.accept = 1;
   ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
                        : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
   if (ptr == NULL) {
@@ -1237,7 +1240,7 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
     return false;
   }
   // an OS page that is larger than its slices gets a second acquire call for the extra bytes
-  const uintptr_t acquire_calls = mi_atomic_load_acquire(&state.acquire_calls);
+  const uintptr_t acquire_calls = state.acquire_calls;
   result &= (acquire_calls == 2 || acquire_calls == 3);
   result &= check_state(&state, acquire_calls, 0);
   if (alignment != 0) result &= ((uintptr_t)ptr % alignment == 0);
@@ -1269,11 +1272,11 @@ static bool test_disallow_arena_alloc(bool transfer) {
     void* small = mi_heap_malloc(heap, 37);
     result &= (small == NULL && errno == ENOMEM);
     result &= check_state(&state, 1, 0);
-    mi_atomic_store_release(&state.accept, 1);
+    state.accept = 1;
     small = mi_heap_malloc(heap, 37);
     void* large = mi_heap_malloc(heap, 8 * 1024 * 1024);
     // the 8 MiB OS page can be larger than its slices and then gets a second acquire call
-    const uintptr_t acquire_calls = mi_atomic_load_acquire(&state.acquire_calls);
+    const uintptr_t acquire_calls = state.acquire_calls;
     result &= (small != NULL && large != NULL && (acquire_calls == 3 || acquire_calls == 4));
     result &= check_state(&state, acquire_calls, 0);
     if (transfer) mi_heap_delete(heap);
@@ -1292,7 +1295,7 @@ static bool test_disallow_arena_alloc(bool transfer) {
 
 static bool test_release_before_destroy(void) {
   callback_state_t state = CALLBACK_STATE_INIT;
-  mi_atomic_store_release(&state.accept, 1);
+  state.accept = 1;
   mi_heap_t* heap = new_heap(&state);
   if (heap == NULL) return false;
   void* ptr = mi_heap_malloc(heap, 8 * 1024 * 1024);
@@ -1303,15 +1306,15 @@ static bool test_release_before_destroy(void) {
   mi_free(ptr);
   mi_heap_collect(heap, true);
   bool result = (check_state(&state, 1, 1) && accounting_is_balanced(&state));
-  const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
+  const uintptr_t released = state.released_bytes;
   mi_heap_destroy(heap);
   result &= check_state(&state, 1, 1);
-  return (result && mi_atomic_load_acquire(&state.released_bytes) == released && accounting_is_balanced(&state));
+  return (result && state.released_bytes == released && accounting_is_balanced(&state));
 }
 
 static bool test_delete_transfers_charge(void) {
   callback_state_t state = CALLBACK_STATE_INIT;
-  mi_atomic_store_release(&state.accept, 1);
+  state.accept = 1;
   mi_heap_t* heap = new_heap(&state);
   if (heap == NULL) return false;
   void* ptr = mi_heap_malloc(heap, 64);
@@ -1319,14 +1322,14 @@ static bool test_delete_transfers_charge(void) {
     mi_heap_destroy(heap);
     return false;
   }
-  bool result = (mi_atomic_load_acquire(&state.acquired_bytes) > 0);
+  bool result = (state.acquired_bytes > 0);
   mi_heap_delete(heap);
   result &= (check_state(&state, 1, 1) && accounting_is_balanced(&state));
-  const uintptr_t released = mi_atomic_load_acquire(&state.released_bytes);
+  const uintptr_t released = state.released_bytes;
   mi_free(ptr);
   mi_collect(true);
   result &= check_state(&state, 1, 1);
-  return (result && mi_atomic_load_acquire(&state.released_bytes) == released && accounting_is_balanced(&state));
+  return (result && state.released_bytes == released && accounting_is_balanced(&state));
 }
 
 // ---------------------------------------------------------------------------
@@ -1351,13 +1354,13 @@ static bool reclaim_page_worker(void) {
 
 static bool test_page_reclaim(void) {
   callback_state_t state = CALLBACK_STATE_INIT;
-  mi_atomic_store_release(&state.accept, 1);
+  state.accept = 1;
   page_reclaim_heap = new_heap(&state);
   if (page_reclaim_heap == NULL) return false;
   bool result = mi_run_on_thread(&abandon_page_worker);
   result &= check_state(&state, 1, 0);
   // Reclamation must succeed even when acquiring a new page would be rejected.
-  mi_atomic_store_release(&state.accept, 0);
+  state.accept = 0;
   if (result) result = mi_run_on_thread(&reclaim_page_worker);
   result &= check_state(&state, 1, 0);
   mi_heap_destroy(page_reclaim_heap);
