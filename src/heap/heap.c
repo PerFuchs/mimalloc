@@ -109,7 +109,8 @@ mi_decl_cold mi_theap_t* _mi_heap_theap_get_or_init(const mi_heap_t* heap)
   return theap;
 }
 
-void _mi_heap_init(mi_heap_t* heap, mi_thread_local_t theap_slot, mi_subproc_t* subproc, mi_arena_id_t exclusive_arena_id, bool use_qsbr)
+void _mi_heap_init(mi_heap_t* heap, mi_thread_local_t theap_slot, mi_subproc_t* subproc, mi_arena_id_t exclusive_arena_id, bool use_qsbr,
+                   mi_page_acquire_fun_t* page_acquire_fun, mi_page_release_fun_t* page_release_fun, void* page_fun_arg)
 {
   // init fields
   heap->theap = theap_slot;
@@ -118,9 +119,9 @@ void _mi_heap_init(mi_heap_t* heap, mi_thread_local_t theap_slot, mi_subproc_t* 
   heap->exclusive_arena = _mi_arena_from_id(exclusive_arena_id);
   heap->reclaim_on_free = mi_option_get(mi_option_page_reclaim_on_free);
   heap->numa_node = -1; // no initial affinity
-  heap->page_acquire = NULL;
-  heap->page_release = NULL;
-  heap->page_callbacks_arg = NULL;
+  heap->page_acquire_fun = page_acquire_fun;
+  heap->page_release_fun = page_release_fun;
+  heap->page_fun_arg = page_fun_arg;
   #if MI_QSBR
   heap->qsbr_enabled = use_qsbr;
   if (use_qsbr) {
@@ -150,7 +151,8 @@ void _mi_heap_init(mi_heap_t* heap, mi_thread_local_t theap_slot, mi_subproc_t* 
   mi_assert_internal(mi_is_heap_main(heap) ? heap->theap == mi_thread_local_key_fast : heap->theap != 0);
 }
 
-mi_heap_t* _mi_heap_new_for_subproc(mi_subproc_t* subproc, mi_arena_id_t exclusive_arena_id, bool is_main_heap, bool use_qsbr) {
+static mi_heap_t* mi_heap_new_for_subproc_ex(mi_subproc_t* subproc, mi_arena_id_t exclusive_arena_id, bool is_main_heap, bool use_qsbr,
+                                             mi_page_acquire_fun_t* page_acquire_fun, mi_page_release_fun_t* page_release_fun, void* page_fun_arg) {
   mi_assert_internal(is_main_heap ? (subproc->heap_main == NULL && subproc->parent != NULL) : subproc->heap_main != NULL);
   // heap data is allocated in the current subproc (or the parent for a main heap)
   mi_subproc_t* const owner = (is_main_heap ? subproc->parent : subproc);
@@ -172,8 +174,12 @@ mi_heap_t* _mi_heap_new_for_subproc(mi_subproc_t* subproc, mi_arena_id_t exclusi
     mi_assert_internal(subproc->heap_main == NULL);
     subproc->heap_main = heap;
   }
-  _mi_heap_init(heap, theap_slot, subproc, exclusive_arena_id, use_qsbr);
+  _mi_heap_init(heap, theap_slot, subproc, exclusive_arena_id, use_qsbr, page_acquire_fun, page_release_fun, page_fun_arg);
   return heap;
+}
+
+mi_heap_t* _mi_heap_new_for_subproc(mi_subproc_t* subproc, mi_arena_id_t exclusive_arena_id, bool is_main_heap, bool use_qsbr) {
+  return mi_heap_new_for_subproc_ex(subproc, exclusive_arena_id, is_main_heap, use_qsbr, NULL, NULL, NULL);
 }
 
 mi_heap_t* mi_heap_new_in_arena(mi_arena_id_t exclusive_arena_id) {
@@ -187,15 +193,9 @@ mi_heap_t* mi_heap_new(void) {
   return mi_heap_new_in_arena(0);
 }
 
-mi_heap_t* _mi_heap_new_with_page_callbacks(mi_page_acquire_fun* acquire, mi_page_release_fun* release,
-                                         void* arg) mi_attr_noexcept {
-  mi_heap_t* const heap = mi_heap_new();
-  if (heap != NULL) {
-    heap->page_acquire = acquire;
-    heap->page_release = release;
-    heap->page_callbacks_arg = arg;
-  }
-  return heap;
+mi_heap_t* mi_heap_new_with_page_callbacks(mi_page_acquire_fun_t* acquire, mi_page_release_fun_t* release, void* arg) {
+  mi_thread_init();  // see `mi_heap_new_in_arena`
+  return mi_heap_new_for_subproc_ex(_mi_subproc(), 0, false, false, acquire, release, arg);
 }
 
 mi_heap_t* mi_heap_new_qsbr(void) {
