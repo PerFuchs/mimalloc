@@ -361,7 +361,7 @@ mi_decl_export bool   mi_arena_contains(mi_arena_id_t arena_id, const void* p);
 mi_decl_nodiscard mi_decl_export mi_heap_t* mi_heap_new_in_arena(mi_arena_id_t arena_id);
 
 // Create a heap that reports every page it adds or gives up, for example to enforce a memory budget.
-// `acquire` is called with the page size including metadata before the page memory is allocated. A page
+// `acquire` is called with the page size before the page memory is allocated. A page
 // allocated directly from the OS can be larger (its mapping is rounded up); `acquire` is then called
 // again after allocation with only the extra bytes. Returning false fails the allocation as out of
 // memory (ENOMEM, see `mi_register_error`). Each accepted page gets one `release` call with the sum of

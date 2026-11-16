@@ -589,9 +589,7 @@ static uint8_t* mi_arenas_page_alloc_fresh_area(mi_theap_t* theap, size_t slice_
 }
 
 
-/* -----------------------------------------------------------
-  Allocate and initialize a fresh page (`mi_arenas_page_alloc_fresh`)
------------------------------------------------------------ */
+// Allocate a fresh page and call heap callbacks
 
 // Free a page without modifying page_bin stats
 static void mi_arenas_page_free_prim(mi_page_t* page);
@@ -809,10 +807,10 @@ static void mi_arenas_page_unacquire(mi_heap_t* heap, size_t bytes) {
   }
 }
 
-// Allocate a fresh page and charge it to the heap. The page is charged its slices before allocation,
-// so a veto takes no memory. A page that comes from the OS can be larger (its mapping is rounded up),
-// so the remainder up to its full size is charged after allocation. The charges add up to
-// `mi_page_full_size`, which `_mi_arenas_page_free` releases.
+// Allocate a fresh page and charge it to the heap. If a page can be served from arenas,
+// `page_acquire_fun` is called before allocation so the callback can veto it. For OS-backed
+// pages, the full size is known only after allocation, so the callback is called again for
+// any extra bytes. If that charge is rejected, the page is freed and the initial charge is released.
 static mi_page_t* mi_arenas_page_alloc_fresh_charged(mi_theap_t* theap, size_t slice_count, size_t block_size, size_t block_alignment, bool commit, mi_page_guards_t guards, bool* rejected)
 {
   mi_heap_t* const heap = mi_theap_heap(theap);

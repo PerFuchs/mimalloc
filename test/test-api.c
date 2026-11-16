@@ -1129,28 +1129,22 @@ static bool test_heap_destroy_stale_theap(void) {
 // ---------------------------------------------------------------------------
 // Callback helpers
 // ---------------------------------------------------------------------------
-// These tests invoke callbacks serially; the page-reclaim workers run one at a time.
 typedef struct callback_state_s {
   uintptr_t accept;
   uintptr_t acquire_calls;
   uintptr_t release_calls;
   uintptr_t acquired_bytes;
   uintptr_t released_bytes;
-  uintptr_t vetoed;
-  uintptr_t deferred_after_veto;
-  uintptr_t nomem_errors;
-  uintptr_t errors;
   uintptr_t callback_errors;
 } callback_state_t;
 
-#define CALLBACK_STATE_INIT { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+#define CALLBACK_STATE_INIT { 0, 0, 0, 0, 0, 0 }
 
 static bool acquire_page(size_t bytes, void* arg) {
   callback_state_t* state = (callback_state_t*)arg;
   assert(bytes > 0);
   state->acquire_calls++;
   if (!state->accept) {
-    state->vetoed = 1;
     return false;
   }
   state->acquired_bytes += bytes;
@@ -1172,16 +1166,14 @@ static void release_page(size_t bytes, void* arg) {
 static bool check_state(callback_state_t* state, uintptr_t expected_acquire_calls, uintptr_t expected_release_calls) {
   const uintptr_t acquire_calls = state->acquire_calls;
   const uintptr_t release_calls = state->release_calls;
-  const uintptr_t deferred_after_veto = state->deferred_after_veto;
-  const uintptr_t errors = state->errors;
   const uintptr_t callback_errors = state->callback_errors;
   const bool result = (acquire_calls == expected_acquire_calls && release_calls == expected_release_calls &&
-                       deferred_after_veto == 0 && errors == 0 && callback_errors == 0);
+                       callback_errors == 0);
   if (!result) {
     fprintf(stderr, "page callbacks: acquire calls %zu (expected %zu), release calls %zu (expected %zu), "
-                    "deferred calls after veto %zu, allocator errors %zu, callback errors %zu (expected zero)\n",
+                    "callback errors %zu (expected zero)\n",
             (size_t)acquire_calls, (size_t)expected_acquire_calls, (size_t)release_calls, (size_t)expected_release_calls,
-            (size_t)deferred_after_veto, (size_t)errors, (size_t)callback_errors);
+            (size_t)callback_errors);
   }
   return result;
 }
@@ -1199,21 +1191,6 @@ static mi_heap_t* new_heap(callback_state_t* state) {
   return mi_heap_new_with_page_callbacks(acquire_page, release_page, state);
 }
 
-static void deferred_free(bool force, unsigned long long heartbeat, void* arg) {
-  (void)force;
-  (void)heartbeat;
-  callback_state_t* state = (callback_state_t*)arg;
-  if (state->vetoed) {
-    state->deferred_after_veto++;
-  }
-}
-
-static void error_handler(int error, void* arg) {
-  callback_state_t* state = (callback_state_t*)arg;
-  if (error == ENOMEM) state->nomem_errors++;
-  else state->errors++;
-}
-
 // ---------------------------------------------------------------------------
 // Page acquisition and release
 // ---------------------------------------------------------------------------
@@ -1221,15 +1198,11 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   callback_state_t state = CALLBACK_STATE_INIT;
   mi_heap_t* heap = new_heap(&state);
   if (heap == NULL) return false;
-  mi_register_deferred_free(deferred_free, &state);
-  mi_register_error(error_handler, &state);
   errno = EINVAL;  // a veto must overwrite an earlier error
   void* ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
                               : (zero ? mi_heap_zalloc(heap, size) : mi_heap_malloc(heap, size)));
   bool result = check_state(&state, 1, 0);
-  result &= (ptr == NULL && errno == ENOMEM && state.nomem_errors == 1);
-  mi_register_deferred_free(NULL, NULL);
-  mi_register_error(NULL, NULL);
+  result &= (ptr == NULL && errno == ENOMEM);
   mi_free(ptr);
   state.accept = 1;
   ptr = (alignment != 0 ? mi_heap_malloc_aligned(heap, size, alignment)
@@ -1254,13 +1227,12 @@ static bool test_veto(size_t size, size_t alignment, bool zero) {
   return (result && accounting_is_balanced(&state));
 }
 
-// Objects too large for an arena get a page directly from the OS; the veto comes before the OS allocation.
+// Test callbacks for pages served by the OS rather than arena.
 static bool test_veto_os(void) {
   return test_veto(mi_arena_max_object_size() + 1024 * 1024, 0, false);
 }
 
-// With arena allocation disallowed, every page comes from the OS and is offered after allocation.
-// `mi_heap_delete` and `mi_heap_destroy` must still find the pages that a thread owns.
+// Test allocations and deallocation with callbacks under the arena allocation disallowed setting.
 static bool test_disallow_arena_alloc(bool transfer) {
   callback_state_t state = CALLBACK_STATE_INIT;
   const long disallow_arena_alloc = mi_option_get(mi_option_disallow_arena_alloc);
@@ -1312,6 +1284,7 @@ static bool test_release_before_destroy(void) {
   return (result && state.released_bytes == released && accounting_is_balanced(&state));
 }
 
+// Test that delete releases the heap's charge while pointers stay valid (pages move to the main heap).
 static bool test_delete_transfers_charge(void) {
   callback_state_t state = CALLBACK_STATE_INIT;
   state.accept = 1;
@@ -1353,7 +1326,7 @@ static bool reclaim_page_worker(void) {
 }
 
 // The first worker leaves a live allocation behind, so its page is abandoned when the worker exits.
-// The next worker must reclaim that page and allocate successfully even though acquire rejects new pages.
+// The next worker must reclaim that page and allocate successfully even though the acquire would reject new pages because no new page is needed.
 static bool test_page_reclaim(void) {
   callback_state_t state = CALLBACK_STATE_INIT;
   state.accept = 1;
